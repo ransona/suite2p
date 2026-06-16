@@ -259,14 +259,6 @@ SETTINGS = {
             "default": 1,
             "description": "Whether to motion register data (2 forces re-registration).",
         },
-        "do_regmetrics": {
-            "gui_name": "Compute reg metrics",
-            "type": bool,
-            "min": None,
-            "max": None,
-            "default": True,
-            "description": "Whether or not to compute registration metrics (requires 1500 frames).",
-        },
         "do_detection": {
             "gui_name": "Do ROI detection",
             "type": bool,
@@ -366,6 +358,14 @@ SETTINGS = {
             "max": 1.,
             "default": 0.1,
             "description": "Max allowed registration shift, as a fraction of frame max(width and height).",
+        },
+        "do_regmetrics": {
+            "gui_name": "Compute reg metrics",
+            "type": bool,
+            "min": None,
+            "max": None,
+            "default": True,
+            "description": "Whether or not to compute registration metrics (requires 1500 frames).",
         },
         "do_bidiphase": {
             "gui_name": "Compute bidiphase offset",
@@ -908,11 +908,25 @@ def default_settings():
     settings["version"] = version  
     return settings
 
+def merge_settings(defaults, updates):
+    merged = defaults.copy()
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_settings(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
 def user_settings():
     """ user-default options to run pipeline """
     if (SETTINGS_FOLDER / "settings_user.npy").exists():
         settings = np.load(SETTINGS_FOLDER / "settings_user.npy", allow_pickle=True).item()
-        settings = {**default_settings(), **settings}
+        if (
+            "run" in settings and "do_regmetrics" in settings["run"] and
+            "do_regmetrics" not in settings.get("registration", {})
+        ):
+            settings.setdefault("registration", {})["do_regmetrics"] = settings["run"]["do_regmetrics"]
+        settings = merge_settings(default_settings(), settings)
     else:
         settings = default_settings()
     return settings

@@ -214,6 +214,8 @@ def set_default_db(DB, db):
 
 def set_default_settings(SETTINGS, settings):
     for key in SETTINGS.keys():
+        if key not in settings:
+            continue
         if "gui_name" not in SETTINGS[key]:
             set_default_settings(SETTINGS[key], settings[key])
         else:

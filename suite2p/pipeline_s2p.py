@@ -112,11 +112,19 @@ def pipeline(save_path, f_reg, f_raw=None, f_reg_chan2=None, f_raw_chan2=None,
         logger.info("----------- Total %0.2f sec" % plane_times["registration"])
         
         n_frames, Ly, Lx = f_reg.shape
-        if settings["run"]["do_regmetrics"] and n_frames >= 1500:
+        do_regmetrics = settings["registration"].get(
+            "do_regmetrics", settings["run"].get("do_regmetrics", True)
+        )
+        if do_regmetrics and n_frames >= 1500:
             yrange, xrange = reg_outputs["yrange"], reg_outputs["xrange"]
+            logger.info(
+                "----------- Starting registration metrics calculation "
+                f"({n_frames} frames, device={device})"
+            )
             t0 = time.time()
             out = registration.get_pc_metrics(f_reg, yrange=yrange, xrange=xrange,
-                                                settings=settings["registration"])
+                                                settings=settings["registration"],
+                                                device=device)
             reg_outputs["tPC"], reg_outputs["regPC"], reg_outputs["regDX"] = out
             plane_times["registration_metrics"] = time.time() - t0
             logger.info("Registration metrics, %0.2f sec." %
