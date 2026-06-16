@@ -5,17 +5,21 @@ import numpy as np
 from numpy import fft
 
 
-def compute(frames: np.ndarray) -> int:
+def compute(frames: np.ndarray, central_fraction: float = 0.7) -> int:
     """
     Compute the bidirectional phase offset between odd and even scan lines.
 
     Estimates the pixel offset between alternating lines that can occur in
-    bidirectional line scanning, using phase correlation along the x-axis.
+    bidirectional line scanning, using phase correlation along the x-axis of
+    the central part of the frame.
 
     Parameters
     ----------
     frames : np.ndarray
         Random subsample of frames of shape (n_frames, Ly, Lx).
+    central_fraction : float, optional
+        Fraction of the frame width to use for estimating the offset, centered
+        on the frame. Defaults to 0.7.
 
     Returns
     -------
@@ -24,6 +28,13 @@ def compute(frames: np.ndarray) -> int:
     """
 
     _, Ly, Lx = frames.shape
+    if not 0 < central_fraction <= 1:
+        raise ValueError("central_fraction must be in the interval (0, 1].")
+
+    xpad = int(np.floor(Lx * (1 - central_fraction) / 2))
+    if xpad > 0:
+        frames = frames[:, :, xpad:Lx - xpad]
+        _, Ly, Lx = frames.shape
 
     # compute phase-correlation between lines in x-direction
     d1 = fft.fft(frames[:, 1::2, :], axis=2)

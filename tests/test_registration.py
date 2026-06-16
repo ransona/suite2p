@@ -5,6 +5,22 @@ from suite2p.registration import bidiphase
 from suite2p.registration.nonrigid import transform_data
 
 
+def test_bidiphase_compute_defaults_to_central_70_percent():
+    rng = np.random.default_rng(42)
+    frames = rng.normal(size=(5, 12, 100))
+
+    assert bidiphase.compute(frames) == bidiphase.compute(
+        frames[:, :, 15:85], central_fraction=1.0
+    )
+
+
+def test_bidiphase_compute_rejects_invalid_central_fraction():
+    frames = np.zeros((2, 4, 32))
+
+    with pytest.raises(ValueError, match="central_fraction"):
+        bidiphase.compute(frames, central_fraction=0)
+
+
 def test_positive_bidiphase_shift_shifts_every_other_line():
     orig = np.array([
         [[1, 2, 3, 4, 5, 6, 7],
