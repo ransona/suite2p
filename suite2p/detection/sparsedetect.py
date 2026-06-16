@@ -560,9 +560,9 @@ def sparsery(mov, sdmov, highpass_neuropil,
                                      kx=min(3, gxy0.shape[1] - 1),
                                      ky=min(3, gxy0.shape[2] - 1))
         I0[:] = gmodel(gxy[0][1, :, 0], gxy[0][0, 0, :])
-    v_corr = I.max(axis=0)
 
     scale, estimate_mode = find_best_scale(I=I, spatial_scale=spatial_scale)
+    v_corr = I[scale]
 
     spatscale_pix = 3 * 2**scale
     if isinstance(spatscale_pix, np.ndarray):
@@ -581,6 +581,7 @@ def sparsery(mov, sdmov, highpass_neuropil,
     mov = np.reshape(mov, (-1, Lyc * Lxc))
     lxs = 3 * 2**np.arange(5)
     nscales = len(lxs)
+    active_scale_indices = np.array([scale]) if spatial_scale > 0 else np.arange(nscales)
 
     v_max = np.zeros(max_ROIs)
     ihop = np.zeros(max_ROIs)
@@ -595,8 +596,8 @@ def sparsery(mov, sdmov, highpass_neuropil,
     t0 = time.time()
     for tj in range(max_ROIs):
         # find peaks in stddev"s
-        v0max = np.array([V1[j].max() for j in range(5)])
-        imap = np.argmax(v0max)
+        v0max = np.array([V1[j].max() for j in active_scale_indices])
+        imap = active_scale_indices[np.argmax(v0max)]
         imax = np.argmax(V1[imap])
         yi, xi = np.unravel_index(imax, (Lyp[imap], Lxp[imap]))
         # position of peak
