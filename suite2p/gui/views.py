@@ -2,11 +2,193 @@
 Copyright © 2023 Howard Hughes Medical Institute, Authored by Carsen Stringer and Marius Pachitariu.
 """
 import numpy as np
+import pyqtgraph as pg
 from qtpy import QtGui, QtCore
-from qtpy.QtWidgets import QPushButton, QSlider, QButtonGroup, QLabel, QStyle, QStyleOptionSlider, QApplication
+from qtpy.QtWidgets import (QPushButton, QSlider, QButtonGroup, QLabel, QStyle,
+                            QStyleOptionSlider, QApplication, QMainWindow)
 from qtpy.QtGui import QPainter
 
 from .. import registration
+
+
+def _normalize_img(img):
+    img = np.asarray(img, dtype=np.float32)
+    finite = np.isfinite(img)
+    if not finite.any():
+        return np.zeros(img.shape, dtype=np.float32)
+    p1, p99 = np.percentile(img[finite], [1, 99])
+    if p99 <= p1:
+        return np.zeros(img.shape, dtype=np.float32)
+    img = (img - p1) / (p99 - p1)
+    return np.clip(img, 0, 1).astype(np.float32)
+
+
+def _to_full_frame(parent, img):
+    img = np.asarray(img)
+    if img.shape == (parent.Ly, parent.Lx):
+        return img
+    full = np.zeros((parent.Ly, parent.Lx), dtype=img.dtype)
+    yr = slice(parent.ops["yrange"][0], parent.ops["yrange"][1])
+    xr = slice(parent.ops["xrange"][0], parent.ops["xrange"][1])
+    if img.shape == full[yr, xr].shape:
+        full[yr, xr] = img
+        return full
+    return img
+
+
+def _as_scale_list(value):
+    if value is None:
+        return []
+    if isinstance(value, np.ndarray) and value.dtype == object:
+        return list(value)
+    value = np.asarray(value)
+    if value.ndim == 3:
+        return [value[k] for k in range(value.shape[0])]
+    return []
+
+
+def _shared_levels(images, threshold=None):
+    vals = []
+    for img in images:
+        arr = np.asarray(img, dtype=np.float32)
+        arr = arr[np.isfinite(arr)]
+        if arr.size:
+            vals.append(arr)
+    if not vals:
+        return (0, 1)
+    vals = np.concatenate(vals)
+    lo = 0 if vals.min() >= 0 else float(np.percentile(vals, 1))
+    hi = float(threshold) if threshold is not None and np.isfinite(float(threshold)) else float(np.percentile(vals, 99.5))
+    if hi <= lo:
+        hi = float(np.percentile(vals, 99.5))
+    if hi <= lo:
+        hi = lo + 1
+    return (lo, hi)
+
+
+class MaskDiagnosticWindow(QMainWindow):
+    def __init__(self, parent=None):
+        super(MaskDiagnosticWindow, self).__init__(parent)
+        self.parent = parent
+        self.setWindowTitle("Suite2p detection mask diagnostics")
+        self.win = pg.GraphicsLayoutWidget()
+        self.setCentralWidget(self.win)
+        self.resize(1500, 900)
+        self._build()
+
+    def _add_image(self, row, col, title, img, full_frame=True, levels=None):
+        if img is None:
+            return
+        img = _to_full_frame(self.parent, img) if full_frame else np.asarray(img)
+        view = self.win.addViewBox(row=row, col=col, lockAspect=True, invertY=True)
+        view.setMenuEnabled(False)
+        item = pg.ImageItem()
+        view.addItem(item)
+        if levels is None:
+            item.setImage(_normalize_img(img), levels=(0, 1))
+        else:
+            item.setImage(np.asarray(img, dtype=np.float32), levels=levels)
+        self.win.addLabel(title, row=row + 1, col=col)
+
+    def _add_colorbar(self, row, col, title, levels):
+        bar = np.linspace(levels[0], levels[1], 256, dtype=np.float32)[:, np.newaxis]
+        view = self.win.addViewBox(row=row, col=col, lockAspect=False, invertY=False)
+        view.setMenuEnabled(False)
+        item = pg.ImageItem()
+        view.addItem(item)
+        item.setImage(bar, levels=levels)
+        self.win.addLabel(f"{title}: {levels[0]:0.2f} to {levels[1]:0.2f}", row=row + 1, col=col)
+
+    def _build(self):
+        ops = self.parent.ops
+        threshold = ops.get("signal_peak_threshold", None)
+        corr_scales = [_to_full_frame(self.parent, img) for img in _as_scale_list(ops.get("Vcorr_scales"))]
+        corr_signal_scales = [
+            _to_full_frame(self.parent, img) for img in _as_scale_list(ops.get("Vcorr_signal_scales"))
+        ]
+        peak_maps = _as_scale_list(ops.get("Vmap"))
+        peak_signal_maps = _as_scale_list(ops.get("Vmap_signal"))
+        activity_levels = _shared_levels(
+            [ops.get("Vcorr")] + corr_scales + corr_signal_scales + peak_maps + peak_signal_maps,
+            threshold=threshold,
+        )
+        bright_area = ops.get("bright_area_percentile", ops.get("signal_top_percent", "n/a"))
+        include_area = ops.get("include_area_percentile", ops.get("dark_percentile", "n/a"))
+        include_threshold = ops.get("include_area_threshold", ops.get("dark_mask_threshold", "n/a"))
+        include_valid = ops.get("include_area_valid_fraction", ops.get("dark_mask_valid_fraction", "n/a"))
+        include_fraction = ops.get("include_min_roi_fraction", ops.get("dark_min_roi_fraction", "n/a"))
+        sparsery_rejected = ops.get("n_sparsery_rejected_size", {})
+        title = (
+            "Mask diagnostics"
+            f" | Bright area {bright_area}%"
+            f" valid {ops.get('threshold_mask_valid_fraction', 'n/a')}"
+            f" threshold {ops.get('bright_area_threshold', 'n/a')}"
+            f" | Include area {include_area}%"
+            f" threshold {include_threshold}"
+            f" valid {include_valid}"
+            f" | peak threshold {ops.get('signal_peak_threshold', 'n/a')}"
+            f" | unscaled {ops.get('signal_peak_threshold_unscaled', 'n/a')}"
+            f" | lateral exclude {ops.get('lateral_exclude_percent', 'n/a')}%"
+            f" | include ROI fraction {include_fraction}"
+            f" | ROI pixels {ops.get('min_roi_pixels', 'n/a')}-{ops.get('max_roi_pixels', 'n/a')}"
+            f" removed {ops.get('n_removed_min_roi_pixels', 'n/a')}/{ops.get('n_removed_max_roi_pixels', 'n/a')}"
+            f" | ROI width {ops.get('min_roi_width', 'n/a')}-{ops.get('max_roi_width', 'n/a')}"
+            f" removed {ops.get('n_removed_min_roi_width', 'n/a')}/{ops.get('n_removed_max_roi_width', 'n/a')}"
+            f" | ROI height {ops.get('min_roi_height', 'n/a')}-{ops.get('max_roi_height', 'n/a')}"
+            f" removed {ops.get('n_removed_min_roi_height', 'n/a')}/{ops.get('n_removed_max_roi_height', 'n/a')}"
+            f" | include removed {ops.get('n_removed_include_area', 'n/a')}"
+            f" | peaks checked {ops.get('n_sparsery_candidates', 'n/a')}/{ops.get('max_peaks_to_check', 'n/a')}"
+            f" | sparsery size rejected {sparsery_rejected}"
+        )
+        self.win.addLabel(title, row=0, col=0, colspan=6)
+
+        self._add_image(1, 0, "Mean image", ops.get("meanImg"), full_frame=True)
+        self._add_image(1, 1, "Smoothed mean signal", ops.get("meanImg_signal_map"), full_frame=True)
+        self._add_image(1, 2, "Bright area mask", ops.get("meanImg_signal_mask"), full_frame=True)
+        self._add_image(1, 3, "Include area mask", ops.get("meanImg_roi_signal_mask"), full_frame=True)
+        self._add_image(1, 4, "Max correlation", ops.get("Vcorr"), full_frame=True,
+                        levels=activity_levels)
+        self._add_colorbar(1, 5, "Activity scale", activity_levels)
+
+        self._add_image(11, 0, "Mean x bright area", ops.get("meanImg_signal_masked"), full_frame=True)
+        self._add_image(11, 1, "Mean x include area", ops.get("meanImg_roi_signal_masked"), full_frame=True)
+        if "meanImg_signal_mask" in ops and "meanImg_roi_signal_mask" in ops:
+            extra_roi_mask = (
+                ops["meanImg_roi_signal_mask"].astype(np.float32) -
+                ops["meanImg_signal_mask"].astype(np.float32)
+            ) > 0
+            self._add_image(11, 2, "Include-only pixels", extra_roi_mask, full_frame=True)
+
+        for k, img in enumerate(corr_scales):
+            self._add_image(3, k, f"Corr scale {k}", img, full_frame=True,
+                            levels=activity_levels)
+
+        self._add_colorbar(3, 5, "Shared corr scale", activity_levels)
+
+        for k, img in enumerate(corr_signal_scales):
+            self._add_image(5, k, f"Masked corr scale {k}", img, full_frame=True,
+                            levels=activity_levels)
+
+        self._add_colorbar(5, 5, "Shared masked scale", activity_levels)
+
+        for k, img in enumerate(peak_maps):
+            self._add_image(7, k, f"Peak map scale {k}", img, full_frame=False,
+                            levels=activity_levels)
+
+        self._add_colorbar(7, 5, "Peak threshold scale", activity_levels)
+
+        for k, img in enumerate(peak_signal_maps):
+            self._add_image(9, k, f"Masked peak map scale {k}", img, full_frame=False,
+                            levels=activity_levels)
+
+        self._add_colorbar(9, 5, "Masked peak scale", activity_levels)
+
+
+def open_mask_diagnostics(parent):
+    if "meanImg_signal_mask" not in parent.ops:
+        return
+    parent.mask_diagnostic_window = MaskDiagnosticWindow(parent)
+    parent.mask_diagnostic_window.show()
 
 
 def make_buttons(parent):
@@ -16,7 +198,8 @@ def make_buttons(parent):
         "Q: ROIs",
         "W: mean img",
         "E: mean img (enhanced)",
-        "R: correlation map",
+        "R: Corr",
+        "Mask",
         "T: max projection",
         "Y: mean img chan2, corr",
         "U: mean img chan2",
@@ -60,7 +243,8 @@ def init_views(parent):
         "Q: ROIs",
         "W: mean img",
         "E: mean img (enhanced)",
-        "R: correlation map",
+        "R: Corr",
+        "Mask",
         "T: max projection",
         "Y: mean img chan2, corr",
         "U: mean img chan2",
@@ -69,8 +253,8 @@ def init_views(parent):
 
     """
     parent.Ly, parent.Lx = parent.ops["Ly"], parent.ops["Lx"]
-    parent.views = np.zeros((7, parent.Ly, parent.Lx, 3), np.float32)
-    for k in range(7):
+    parent.views = np.zeros((8, parent.Ly, parent.Lx, 3), np.float32)
+    for k in range(8):
         if k == 2:
             if "meanImgE" not in parent.ops:
                 meanImgE = registration.highpass_mean_image(parent.ops["meanImg"], 
@@ -103,6 +287,18 @@ def init_views(parent):
             else:
                 mimg = np.zeros((parent.Ly, parent.Lx), np.float32)
         elif k == 4:
+            mask_key = "meanImg_roi_signal_mask" if "meanImg_roi_signal_mask" in parent.ops else "meanImg_signal_mask"
+            if mask_key in parent.ops:
+                signal_mask = parent.ops[mask_key].astype(np.float32)
+                mimg = np.zeros((parent.Ly, parent.Lx), np.float32)
+                if signal_mask.shape[0] == parent.Ly and signal_mask.shape[1] == parent.Lx:
+                    mimg = signal_mask
+                else:
+                    mimg[parent.ops["yrange"][0]:parent.ops["yrange"][1],
+                         parent.ops["xrange"][0]:parent.ops["xrange"][1]] = signal_mask
+            else:
+                mimg = np.zeros((parent.Ly, parent.Lx), np.float32)
+        elif k == 5:
             if "max_proj" in parent.ops:
                 mproj = parent.ops["max_proj"]
                 mimg1 = np.percentile(mproj, 1)
@@ -117,14 +313,14 @@ def init_views(parent):
                 mimg = np.maximum(0, np.minimum(1, mimg))
             else:
                 mimg = 0.5 * np.ones((parent.Ly, parent.Lx), np.float32)
-        elif k == 5:
+        elif k == 6:
             if "meanImg_chan2_corrected" in parent.ops:
                 mimg = parent.ops["meanImg_chan2_corrected"]
                 mimg1 = np.percentile(mimg, 1)
                 mimg99 = np.percentile(mimg, 99)
                 mimg = (mimg - mimg1) / (mimg99 - mimg1)
                 mimg = np.maximum(0, np.minimum(1, mimg))
-        elif k == 6:
+        elif k == 7:
             if "meanImg_chan2" in parent.ops:
                 mimg = parent.ops["meanImg_chan2"]
                 mimg1 = np.percentile(mimg, 1)
@@ -171,6 +367,8 @@ class ViewButton(QPushButton):
         self.setStyleSheet(parent.stylePressed)
         parent.ops_plot["view"] = bid
         parent.update_plot()
+        if bid == 4:
+            open_mask_diagnostics(parent)
 
 
 class RangeSlider(QSlider):

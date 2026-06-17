@@ -107,11 +107,55 @@ class ViewBox(pg.ViewBox):
         self.parent.show()
 
 
+def synchronize_views(parent):
+    """Keep the two main image panes at the same pan/zoom range."""
+    parent.p2.setXLink(parent.p1)
+    parent.p2.setYLink(parent.p1)
+
+    if getattr(parent, "_view_sync_connected", False):
+        return
+
+    parent._view_sync_connected = True
+    parent._syncing_view_range = False
+
+    def sync_range(source, target):
+        if parent._syncing_view_range:
+            return
+        parent._syncing_view_range = True
+        try:
+            view_range = source.viewRange()
+            target.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
+        finally:
+            parent._syncing_view_range = False
+
+    parent.p1.sigRangeChanged.connect(lambda *_: sync_range(parent.p1, parent.p2))
+    parent.p2.sigRangeChanged.connect(lambda *_: sync_range(parent.p2, parent.p1))
+
+
+def reset_image_view(parent):
+    """Reset both main image panes to the full frame and prevent blank panning."""
+    synchronize_views(parent)
+    xpad = parent.ops["Lx"] * 0.5
+    ypad = parent.ops["Ly"] * 0.5
+    for viewbox in (parent.p1, parent.p2):
+        viewbox.setLimits(xMin=-xpad, xMax=parent.ops["Lx"] + xpad,
+                          yMin=-ypad, yMax=parent.ops["Ly"] + ypad)
+
+    parent._syncing_view_range = True
+    try:
+        parent.p1.setRange(xRange=(0, parent.ops["Lx"]),
+                           yRange=(0, parent.ops["Ly"]),
+                           padding=0)
+        parent.p2.setRange(xRange=(0, parent.ops["Lx"]),
+                           yRange=(0, parent.ops["Ly"]),
+                           padding=0)
+    finally:
+        parent._syncing_view_range = False
+    synchronize_views(parent)
+
+
 def init_range(parent):
-    parent.p1.setXRange(0, parent.ops["Lx"])
-    parent.p1.setYRange(0, parent.ops["Ly"])
-    parent.p2.setXRange(0, parent.ops["Lx"])
-    parent.p2.setYRange(0, parent.ops["Ly"])
+    reset_image_view(parent)
     parent.p3.setLimits(xMin=0, xMax=parent.Fcell.shape[1])
     parent.trange = np.arange(0, parent.Fcell.shape[1])
 

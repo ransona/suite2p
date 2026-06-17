@@ -245,6 +245,22 @@ def combined(save_folder, save=True):
         meanImg_chan2_corrected = np.zeros((LY, LX))
     if any(["max_proj" in db for db in dbs]):
         max_proj = np.zeros((LY, LX))
+    has_signal_mask = any(["meanImg_signal_mask" in db for db in dbs])
+    if has_signal_mask:
+        meanImg_signal_mask = np.zeros((LY, LX), dtype=bool)
+        meanImg_roi_signal_mask = np.zeros((LY, LX), dtype=bool)
+        meanImg_signal_map = np.zeros((LY, LX), dtype=np.float32)
+        meanImg_signal_masked = np.zeros((LY, LX), dtype=np.float32)
+        meanImg_roi_signal_masked = np.zeros((LY, LX), dtype=np.float32)
+    has_vcorr_scales = any(["Vcorr_scales" in db for db in dbs])
+    if has_vcorr_scales:
+        nscales = next(db["Vcorr_scales"].shape[0] for db in dbs if "Vcorr_scales" in db)
+        Vcorr_scales = np.zeros((nscales, LY, LX), dtype=np.float32)
+    has_vcorr_signal_scales = any(["Vcorr_signal_scales" in db for db in dbs])
+    if has_vcorr_signal_scales:
+        nscales = next(db["Vcorr_signal_scales"].shape[0] for db in dbs
+                       if "Vcorr_signal_scales" in db)
+        Vcorr_signal_scales = np.zeros((nscales, LY, LX), dtype=np.float32)
 
     Vcorr = np.zeros((LY, LX))
     Nfr = np.amax(np.array([db["nframes"] for db in dbs]))
@@ -257,6 +273,20 @@ def combined(save_folder, save=True):
         xrange = np.arange(dx[k], dx[k] + Lx[k])
         yrange = np.arange(dy[k], dy[k] + Ly[k])
         meanImg[np.ix_(yrange, xrange)] = db["meanImg"]
+        if "meanImg_signal_mask" in db:
+            meanImg_signal_mask[np.ix_(yrange, xrange)] = db["meanImg_signal_mask"]
+            if "meanImg_roi_signal_mask" in db:
+                meanImg_roi_signal_mask[np.ix_(yrange, xrange)] = db["meanImg_roi_signal_mask"]
+            else:
+                meanImg_roi_signal_mask[np.ix_(yrange, xrange)] = db["meanImg_signal_mask"]
+            if "meanImg_signal_map" in db:
+                meanImg_signal_map[np.ix_(yrange, xrange)] = db["meanImg_signal_map"]
+            if "meanImg_signal_masked" in db:
+                meanImg_signal_masked[np.ix_(yrange, xrange)] = db["meanImg_signal_masked"]
+            if "meanImg_roi_signal_masked" in db:
+                meanImg_roi_signal_masked[np.ix_(yrange, xrange)] = db["meanImg_roi_signal_masked"]
+            elif "meanImg_signal_masked" in db:
+                meanImg_roi_signal_masked[np.ix_(yrange, xrange)] = db["meanImg_signal_masked"]
         if "meanImgE" in db:
             meanImgE[np.ix_(yrange, xrange)] = db["meanImgE"]
         if db["nchannels"] > 1:
@@ -271,6 +301,12 @@ def combined(save_folder, save=True):
         Vcorr[np.ix_(yrange, xrange)] = db["Vcorr"]
         if "max_proj" in db:
             max_proj[np.ix_(yrange, xrange)] = db["max_proj"]
+        if "Vcorr_scales" in db:
+            for j in range(db["Vcorr_scales"].shape[0]):
+                Vcorr_scales[j][np.ix_(yrange, xrange)] = db["Vcorr_scales"][j]
+        if "Vcorr_signal_scales" in db:
+            for j in range(db["Vcorr_signal_scales"].shape[0]):
+                Vcorr_signal_scales[j][np.ix_(yrange, xrange)] = db["Vcorr_signal_scales"][j]
         for j in range(len(stat0)):
             stat0[j]["xpix"] += dx[k]
             stat0[j]["ypix"] += dy[k]
@@ -316,6 +352,16 @@ def combined(save_folder, save=True):
         db["meanImg_chan2_corrected"] = meanImg_chan2_corrected
     if "max_proj" in db:
         db["max_proj"] = max_proj
+    if has_signal_mask:
+        db["meanImg_signal_mask"] = meanImg_signal_mask
+        db["meanImg_roi_signal_mask"] = meanImg_roi_signal_mask
+        db["meanImg_signal_map"] = meanImg_signal_map
+        db["meanImg_signal_masked"] = meanImg_signal_masked
+        db["meanImg_roi_signal_masked"] = meanImg_roi_signal_masked
+    if has_vcorr_scales:
+        db["Vcorr_scales"] = Vcorr_scales
+    if has_vcorr_signal_scales:
+        db["Vcorr_signal_scales"] = Vcorr_signal_scales
     db["Vcorr"] = Vcorr
     db["Ly"] = LY
     db["Lx"] = LX

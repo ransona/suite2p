@@ -217,8 +217,8 @@ class ROIDraw(QMainWindow):
 
         # view buttons
         self.views = [
-            "W: mean img", "E: mean img (enhanced)", "R: correlation map",
-            "T: max projection"
+            "W: mean img", "E: mean img (enhanced)", "R: Corr",
+            "Mask", "T: max projection"
         ]
         self.has_chan2 = "meanImg_chan2" in parent.ops
         if self.has_chan2:
@@ -334,8 +334,10 @@ class ROIDraw(QMainWindow):
             elif i == 2:
                 src = self.parent.ops["Vcorr"]
             elif i == 3:
+                src = self.parent.ops.get("meanImg_signal_mask", None)
+            elif i == 4:
                 src = self.parent.ops.get("max_proj", None)
-            elif i == 4 and self.has_chan2:
+            elif i == 5 and self.has_chan2:
                 src = self.parent.ops["meanImg_chan2"]
             else:
                 src = None
@@ -399,11 +401,11 @@ class ROIDraw(QMainWindow):
                 self.viewbtns.button(2).setChecked(True)
                 self.viewbtns.button(2).press(self, 2)
             elif event.key() == QtCore.Qt.Key_T:
-                self.viewbtns.button(3).setChecked(True)
-                self.viewbtns.button(3).press(self, 3)
-            elif event.key() == QtCore.Qt.Key_Y and self.has_chan2:
                 self.viewbtns.button(4).setChecked(True)
                 self.viewbtns.button(4).press(self, 4)
+            elif event.key() == QtCore.Qt.Key_Y and self.has_chan2:
+                self.viewbtns.button(5).setChecked(True)
+                self.viewbtns.button(5).press(self, 5)
 
     def add_ROI(self, pos=None):
         self.iROI = len(self.ROIs)

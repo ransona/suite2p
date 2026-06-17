@@ -278,9 +278,8 @@ class MainWindow(QMainWindow):
         self.view2.setLevels([0, 255])
         self.color2.setLevels([0, 255])
 
-        # LINK TWO VIEWS!
-        self.p2.setXLink("plot1")
-        self.p2.setYLink("plot1")
+        # Keep left and right image panes synchronized.
+        graphics.synchronize_views(self)
 
         # --- fluorescence trace plot
         self.p3 = graphics.TraceBox(parent=self, invertY=False)
@@ -323,16 +322,16 @@ class MainWindow(QMainWindow):
                     self.viewbtns.button(3).setChecked(True)
                     self.viewbtns.button(3).press(self, 3)
                 elif event.key() == QtCore.Qt.Key_T:
-                    self.viewbtns.button(4).setChecked(True)
-                    self.viewbtns.button(4).press(self, 4)
+                    self.viewbtns.button(5).setChecked(True)
+                    self.viewbtns.button(5).press(self, 5)
                 elif event.key() == QtCore.Qt.Key_U:
                     if "meanImg_chan2" in self.ops:
-                        self.viewbtns.button(6).setChecked(True)
-                        self.viewbtns.button(6).press(self, 6)
+                        self.viewbtns.button(7).setChecked(True)
+                        self.viewbtns.button(7).press(self, 7)
                 elif event.key() == QtCore.Qt.Key_Y:
                     if "meanImg_chan2_corrected" in self.ops:
-                        self.viewbtns.button(5).setChecked(True)
-                        self.viewbtns.button(5).press(self, 5)
+                        self.viewbtns.button(6).setChecked(True)
+                        self.viewbtns.button(6).press(self, 6)
                 elif event.key() == QtCore.Qt.Key_Space:
                     self.checkBox.toggle()
                 #Agus
@@ -688,6 +687,7 @@ class MainWindow(QMainWindow):
         self.p1.setXRange(imin[1], imax[1])
         self.p2.setYRange(imin[0], imax[0])
         self.p2.setXRange(imin[1], imax[1])
+        graphics.synchronize_views(self)
         self.win.show()
         self.show()
 

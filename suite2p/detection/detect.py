@@ -8,6 +8,7 @@ from typing import Dict, Any
 from tqdm import trange
 import torch
 import logging 
+from scipy.ndimage import gaussian_filter
 logger = logging.getLogger(__name__)
 
 from . import sourcery, sparsedetect, chan2detect, utils, anatomical
@@ -18,6 +19,63 @@ from .. import default_settings
 from ..logger import TqdmToLogger
 
 cellpose_options_num = {'max_proj / meanImg': 1, 'meanImg':2, 'enhanced_meanImg': 3 ,'max_proj': 4}
+
+
+def mean_intensity_signal_map(meanImg, diameter):
+    """Return a smoothed, normalized mean-image signal map."""
+    meanImg = meanImg.astype(np.float32, copy=False)
+    if not np.isfinite(meanImg).any():
+        return np.zeros(meanImg.shape, dtype=np.float32)
+
+    p1, p99 = np.nanpercentile(meanImg, [1, 99])
+    meanImg = np.nan_to_num(meanImg, nan=p1, posinf=p99, neginf=p1)
+    if p99 > p1:
+        norm = np.clip((meanImg - p1) / (p99 - p1), 0, 1)
+    else:
+        norm = np.zeros(meanImg.shape, dtype=np.float32)
+
+    diameter = np.asarray(diameter, dtype=float).ravel()
+    if diameter.size == 0:
+        sigma = 6.
+    elif diameter.size == 1:
+        sigma = max(1., diameter[0] / 2.)
+    else:
+        sigma = tuple(np.maximum(1., diameter[:2] / 2.))
+
+    smooth = gaussian_filter(norm.astype(np.float32), sigma=sigma)
+    return smooth.astype(np.float32, copy=False)
+
+
+def brightest_signal_mask(signal_map, top_percent=30.):
+    """Return mask containing the brightest top_percent pixels."""
+    signal_map = np.asarray(signal_map, dtype=np.float32)
+    top_percent = np.clip(float(top_percent), 0., 100.)
+    if top_percent <= 0.:
+        return np.ones(signal_map.shape, dtype=bool), None
+    threshold = np.nanpercentile(signal_map, 100. - top_percent)
+    return signal_map >= threshold, threshold
+
+
+def percentile_signal_mask(signal_map, percentile=5.):
+    """Return mask containing pixels above a smoothed mean-image percentile."""
+    signal_map = np.asarray(signal_map, dtype=np.float32)
+    percentile = np.clip(float(percentile), 0., 100.)
+    if percentile <= 0.:
+        return np.ones(signal_map.shape, dtype=bool), None
+    threshold = np.nanpercentile(signal_map, percentile)
+    return signal_map > threshold, threshold
+
+
+def lateral_signal_mask(shape, exclude_percent=5.):
+    """Return mask excluding a symmetric percentage from left/right frame edges."""
+    exclude_percent = np.clip(float(exclude_percent), 0., 50.)
+    mask = np.ones(shape, dtype=bool)
+    nx = int(np.floor(shape[1] * exclude_percent / 100.))
+    if nx > 0:
+        mask[:, :nx] = False
+        mask[:, -nx:] = False
+    return mask
+
 
 def bin_movie(f_reg, bin_size, yrange=None, xrange=None, badframes=None, nbins=5000):
     """
@@ -186,7 +244,56 @@ def detection_wrapper(f_reg, diameter=[12., 12.], tau=1., fs=30, meanImg_chan2=N
             mov, block_size=settings["block_size"],
             n_comps_frac=0.5)
 
-    meanImg = mov.mean(axis=0) 
+    meanImg = mov.mean(axis=0)
+    threshold_signal_mask = None
+    roi_signal_mask = None
+    meanImg_signal_map = None
+    peak_candidate_mask = None
+    bright_area_threshold = None
+    include_area_threshold = None
+    bright_area_percentile = float(settings.get(
+        "bright_area_percentile", settings.get("signal_top_percent", 30.)
+    ) or 0.)
+    include_area_percentile = float(settings.get(
+        "include_area_percentile", settings.get("dark_percentile", 5.)
+    ) or 0.)
+    lateral_exclude_percent = float(settings.get("lateral_exclude_percent", 5.) or 0.)
+    min_roi_pixels = int(settings.get("min_roi_pixels", 0) or 0)
+    max_roi_pixels = int(settings.get("max_roi_pixels", 0) or 0)
+    min_roi_width = int(settings.get("min_roi_width", 0) or 0)
+    max_roi_width = int(settings.get("max_roi_width", 0) or 0)
+    min_roi_height = int(settings.get("min_roi_height", 0) or 0)
+    max_roi_height = int(settings.get("max_roi_height", 0) or 0)
+
+    if bright_area_percentile > 0. or include_area_percentile > 0.:
+        meanImg_signal_map = mean_intensity_signal_map(meanImg, diameter=diameter)
+        threshold_signal_mask, bright_area_threshold = brightest_signal_mask(
+            meanImg_signal_map, top_percent=bright_area_percentile
+        )
+        roi_signal_mask, include_area_threshold = percentile_signal_mask(
+            meanImg_signal_map, percentile=include_area_percentile
+        )
+        threshold_mask_valid_fraction = float(threshold_signal_mask.mean())
+        roi_mask_valid_fraction = float(roi_signal_mask.mean())
+        logger.info(
+            f"Bright area mask keeps {100 * threshold_mask_valid_fraction:0.2f}% "
+            "of pixels for peak threshold estimation"
+        )
+        logger.info(
+            f"Include area mask keeps {100 * roi_mask_valid_fraction:0.2f}% "
+            "of pixels for ROI validation"
+        )
+
+    if lateral_exclude_percent > 0.:
+        peak_candidate_mask = lateral_signal_mask(
+            meanImg.shape, exclude_percent=lateral_exclude_percent
+        )
+        ignored = peak_candidate_mask.size - peak_candidate_mask.sum()
+        logger.info(
+            f"Ignoring {ignored}/{peak_candidate_mask.size} pixels "
+            f"({100 * ignored / peak_candidate_mask.size:0.2f}%) at lateral "
+            f"{lateral_exclude_percent:0.1f}% edges for peak candidate detection"
+        )
 
     mov = utils.temporal_high_pass_filter(mov=mov, width=settings["highpass_time"])
     max_proj = mov.max(axis=0) 
@@ -209,6 +316,14 @@ def detection_wrapper(f_reg, diameter=[12., 12.], tau=1., fs=30, meanImg_chan2=N
             new_settings, stat = sparsedetect.sparsery(
                 mov=mov, sdmov=sdmov,
                 threshold_scaling=settings["threshold_scaling"],
+                signal_mask=threshold_signal_mask,
+                peak_candidate_mask=peak_candidate_mask,
+                min_roi_pixels=min_roi_pixels,
+                max_roi_pixels=max_roi_pixels,
+                min_roi_width=min_roi_width,
+                max_roi_width=max_roi_width,
+                min_roi_height=min_roi_height,
+                max_roi_height=max_roi_height,
                 **settings["sparsery_settings"]
             )
         else:
@@ -217,6 +332,74 @@ def detection_wrapper(f_reg, diameter=[12., 12.], tau=1., fs=30, meanImg_chan2=N
                                               **settings["sourcery_settings"])
     logger.info("Detected %d ROIs, %0.2f sec" % (len(stat), time.time() - t0))
     stat = np.array(stat)
+    n_removed_include_area = 0
+    n_removed_min_roi_pixels = 0
+    n_removed_max_roi_pixels = 0
+    n_removed_min_roi_width = 0
+    n_removed_max_roi_width = 0
+    n_removed_min_roi_height = 0
+    n_removed_max_roi_height = 0
+
+    if roi_signal_mask is not None and len(stat) > 0:
+        min_fraction = settings.get(
+            "include_min_roi_fraction", settings.get("dark_min_roi_fraction", 0.5)
+        )
+        keep = np.array([
+            roi_signal_mask[s["ypix"], s["xpix"]].mean() >= min_fraction
+            for s in stat
+        ])
+        n_removed_include_area = int((~keep).sum())
+        if n_removed_include_area > 0:
+            logger.info(
+                f"Removed {n_removed_include_area} ROIs with < {min_fraction:0.2f} "
+                "of footprint in Include area"
+            )
+        stat = stat[keep]
+
+    if min_roi_pixels > 0 and len(stat) > 0:
+        keep = np.array([len(s["ypix"]) >= min_roi_pixels for s in stat])
+        n_removed_min_roi_pixels = int((~keep).sum())
+        if n_removed_min_roi_pixels > 0:
+            logger.info(f"Removed {n_removed_min_roi_pixels} ROIs with fewer than {min_roi_pixels} pixels")
+        stat = stat[keep]
+    if max_roi_pixels > 0 and len(stat) > 0:
+        keep = np.array([len(s["ypix"]) <= max_roi_pixels for s in stat])
+        n_removed_max_roi_pixels = int((~keep).sum())
+        if n_removed_max_roi_pixels > 0:
+            logger.info(f"Removed {n_removed_max_roi_pixels} ROIs with more than {max_roi_pixels} pixels")
+        stat = stat[keep]
+    if min_roi_width > 0 and len(stat) > 0:
+        keep = np.array([
+            (np.max(s["xpix"]) - np.min(s["xpix"]) + 1) >= min_roi_width for s in stat
+        ])
+        n_removed_min_roi_width = int((~keep).sum())
+        if n_removed_min_roi_width > 0:
+            logger.info(f"Removed {n_removed_min_roi_width} ROIs narrower than {min_roi_width} pixels")
+        stat = stat[keep]
+    if max_roi_width > 0 and len(stat) > 0:
+        keep = np.array([
+            (np.max(s["xpix"]) - np.min(s["xpix"]) + 1) <= max_roi_width for s in stat
+        ])
+        n_removed_max_roi_width = int((~keep).sum())
+        if n_removed_max_roi_width > 0:
+            logger.info(f"Removed {n_removed_max_roi_width} ROIs wider than {max_roi_width} pixels")
+        stat = stat[keep]
+    if min_roi_height > 0 and len(stat) > 0:
+        keep = np.array([
+            (np.max(s["ypix"]) - np.min(s["ypix"]) + 1) >= min_roi_height for s in stat
+        ])
+        n_removed_min_roi_height = int((~keep).sum())
+        if n_removed_min_roi_height > 0:
+            logger.info(f"Removed {n_removed_min_roi_height} ROIs shorter than {min_roi_height} pixels")
+        stat = stat[keep]
+    if max_roi_height > 0 and len(stat) > 0:
+        keep = np.array([
+            (np.max(s["ypix"]) - np.min(s["ypix"]) + 1) <= max_roi_height for s in stat
+        ])
+        n_removed_max_roi_height = int((~keep).sum())
+        if n_removed_max_roi_height > 0:
+            logger.info(f"Removed {n_removed_max_roi_height} ROIs taller than {max_roi_height} pixels")
+        stat = stat[keep]
 
     if len(stat) == 0:
         raise ValueError(
@@ -277,6 +460,45 @@ def detection_wrapper(f_reg, diameter=[12., 12.], tau=1., fs=30, meanImg_chan2=N
     new_settings["meanImg_crop"] = meanImg
     new_settings["max_proj"] = max_proj
     new_settings["diameter"] = diameter
+    if threshold_signal_mask is not None:
+        full_mask = np.zeros((Ly, Lx), dtype=bool)
+        full_roi_mask = np.zeros((Ly, Lx), dtype=bool)
+        full_signal_map = np.zeros((Ly, Lx), dtype=np.float32)
+        full_masked_mean = np.zeros((Ly, Lx), dtype=np.float32)
+        full_roi_masked_mean = np.zeros((Ly, Lx), dtype=np.float32)
+        full_mask[yrange[0]:yrange[1], xrange[0]:xrange[1]] = threshold_signal_mask
+        full_roi_mask[yrange[0]:yrange[1], xrange[0]:xrange[1]] = roi_signal_mask
+        full_signal_map[yrange[0]:yrange[1], xrange[0]:xrange[1]] = meanImg_signal_map
+        full_masked_mean[yrange[0]:yrange[1], xrange[0]:xrange[1]] = meanImg * threshold_signal_mask
+        full_roi_masked_mean[yrange[0]:yrange[1], xrange[0]:xrange[1]] = meanImg * roi_signal_mask
+        new_settings["meanImg_signal_mask"] = full_mask
+        new_settings["meanImg_roi_signal_mask"] = full_roi_mask
+        new_settings["meanImg_signal_map"] = full_signal_map
+        new_settings["meanImg_signal_masked"] = full_masked_mean
+        new_settings["meanImg_roi_signal_masked"] = full_roi_masked_mean
+        new_settings["bright_area_percentile"] = bright_area_percentile
+        new_settings["include_area_percentile"] = include_area_percentile
+        new_settings["bright_area_threshold"] = bright_area_threshold
+        new_settings["include_area_threshold"] = include_area_threshold
+        new_settings["threshold_mask_valid_fraction"] = threshold_mask_valid_fraction
+        new_settings["include_area_valid_fraction"] = roi_mask_valid_fraction
+    new_settings["lateral_exclude_percent"] = lateral_exclude_percent
+    new_settings["include_min_roi_fraction"] = settings.get(
+        "include_min_roi_fraction", settings.get("dark_min_roi_fraction", 0.5)
+    )
+    new_settings["min_roi_pixels"] = min_roi_pixels
+    new_settings["max_roi_pixels"] = max_roi_pixels
+    new_settings["min_roi_width"] = min_roi_width
+    new_settings["max_roi_width"] = max_roi_width
+    new_settings["min_roi_height"] = min_roi_height
+    new_settings["max_roi_height"] = max_roi_height
+    new_settings["n_removed_include_area"] = n_removed_include_area
+    new_settings["n_removed_min_roi_pixels"] = n_removed_min_roi_pixels
+    new_settings["n_removed_max_roi_pixels"] = n_removed_max_roi_pixels
+    new_settings["n_removed_min_roi_width"] = n_removed_min_roi_width
+    new_settings["n_removed_max_roi_width"] = n_removed_max_roi_width
+    new_settings["n_removed_min_roi_height"] = n_removed_min_roi_height
+    new_settings["n_removed_max_roi_height"] = n_removed_max_roi_height
 
     return new_settings, stat, redcell
 

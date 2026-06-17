@@ -103,6 +103,8 @@ class QuadButton(QPushButton):
         parent.p2.setYRange(self.yrange[0], self.yrange[1])
         parent.p2.setXLink("plot1")
         parent.p2.setYLink("plot1")
+        if hasattr(parent, "_view_sync_connected"):
+            parent._syncing_view_range = False
         parent.show()
 
 
@@ -122,10 +124,18 @@ class SizeButton(QPushButton):
 
     def press(self, parent):
         bid = self.bid
+        previous_bid = getattr(parent, "_last_size_bid", parent.sizebtns.checkedId())
+        source_view = parent.p2 if previous_bid == 2 else parent.p1
+        view_range = source_view.viewRange()
+
+        for btn in parent.sizebtns.buttons():
+            btn.setStyleSheet(parent.styleUnpressed)
+        self.setStyleSheet(parent.stylePressed)
+        self.setChecked(True)
+        parent._last_size_bid = bid
+
         ts = 100
         if bid == 0:
-            parent.p2.linkView(parent.p2.XAxis, view=None)
-            parent.p2.linkView(parent.p2.YAxis, view=None)
             parent.win.ci.layout.setColumnStretchFactor(0, ts)
             parent.win.ci.layout.setColumnStretchFactor(1, 0)
         elif bid == 1:
@@ -134,10 +144,18 @@ class SizeButton(QPushButton):
             parent.p2.setXLink("plot1")
             parent.p2.setYLink("plot1")
         elif bid == 2:
-            parent.p2.linkView(parent.p2.XAxis, view=None)
-            parent.p2.linkView(parent.p2.YAxis, view=None)
             parent.win.ci.layout.setColumnStretchFactor(0, 0)
             parent.win.ci.layout.setColumnStretchFactor(1, ts)
+        parent.p2.setXLink("plot1")
+        parent.p2.setYLink("plot1")
+        if hasattr(parent, "_syncing_view_range"):
+            parent._syncing_view_range = True
+        try:
+            parent.p1.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
+            parent.p2.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
+        finally:
+            if hasattr(parent, "_syncing_view_range"):
+                parent._syncing_view_range = False
         # only enable selection buttons when not in "both" view
         if bid != 1:
             if parent.ops_plot["color"] != 0:

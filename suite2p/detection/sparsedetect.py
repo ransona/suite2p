@@ -494,7 +494,10 @@ def find_best_scale(I, spatial_scale):
 
 def sparsery(mov, sdmov, highpass_neuropil,
              spatial_scale, threshold_scaling, max_ROIs,
-             active_percentile=0):
+             active_percentile=0, max_peaks_to_check=20000, signal_mask=None,
+             peak_candidate_mask=None, min_roi_pixels=0, max_roi_pixels=0,
+             min_roi_width=0, max_roi_width=0, min_roi_height=0,
+             max_roi_height=0):
     """
     Detect ROIs in a movie using doubly-sparse matrix decomposition.
 
@@ -522,6 +525,12 @@ def sparsery(mov, sdmov, highpass_neuropil,
     active_percentile : float, optional (default 0)
         If positive, use this percentile of the temporal projection as an
         alternative activity threshold.
+    max_peaks_to_check : int, optional (default 20000)
+        Maximum number of candidate peaks to test while looking for accepted ROIs.
+    min_roi_pixels, max_roi_pixels : int, optional
+        Raw ROI footprint pixel-count limits. A value of 0 disables that limit.
+    min_roi_width, max_roi_width, min_roi_height, max_roi_height : int, optional
+        ROI footprint extent limits in pixels. A value of 0 disables that limit.
 
     Returns
     -------
@@ -554,7 +563,7 @@ def sparsery(mov, sdmov, highpass_neuropil,
         movu.append(movu0)
 
     # spline over scales
-    I = np.zeros((len(gxy), gxy[0].shape[1], gxy[0].shape[2]))
+    I = np.zeros((len(movu), gxy[0].shape[1], gxy[0].shape[2]))
     for movu0, gxy0, I0 in zip(movu, gxy, I):
         gmodel = RectBivariateSpline(gxy0[1, :, 0], gxy0[0, 0, :], movu0.max(axis=0),
                                      kx=min(3, gxy0.shape[1] - 1),
@@ -562,20 +571,55 @@ def sparsery(mov, sdmov, highpass_neuropil,
         I0[:] = gmodel(gxy[0][1, :, 0], gxy[0][0, 0, :])
     v_corr = I.max(axis=0)
 
-    scale, estimate_mode = find_best_scale(I=I, spatial_scale=spatial_scale)
+    if signal_mask is not None:
+        I_for_threshold = I.copy()
+        I_for_threshold[:, ~signal_mask] = 0
+    else:
+        I_for_threshold = I
+
+    scale, estimate_mode = find_best_scale(I=I_for_threshold, spatial_scale=spatial_scale)
 
     spatscale_pix = 3 * 2**scale
     if isinstance(spatscale_pix, np.ndarray):
         spatscale_pix = spatscale_pix.item()
     mask_window = int(((spatscale_pix * 1.5) // 2) * 2)
-    Th2 = threshold_scaling * 5 * max(
-        1, scale)  # threshold for accepted peaks (scale it by spatial scale)
+    base_Th2 = 5 * max(1, scale)
+    Th2 = threshold_scaling * base_Th2  # threshold for active frames
     vmultiplier = max(1, mov.shape[0] / 1200)
     logger.info("NOTE: %s spatial scale ~%d pixels, time epochs %2.2f, threshold %2.2f " %
           (estimate_mode.value, spatscale_pix, vmultiplier, vmultiplier * Th2))
 
-    # get standard deviation for pixels for all values > Th2
-    v_map = [threshold_reduce(movu0, Th2) for movu0 in movu]
+    # get standard deviation maps from an unscaled base cutoff, then apply
+    # threshold_scaling to the peak acceptance threshold.
+    v_map = [threshold_reduce(movu0, base_Th2) for movu0 in movu]
+    peak_threshold_unscaled = vmultiplier * base_Th2
+    peak_threshold = threshold_scaling * peak_threshold_unscaled
+    signal_masks = None
+    candidate_masks = None
+    v_map_masked = None
+    if signal_mask is not None:
+        signal_masks = []
+        mask0 = signal_mask.astype(np.float32)[np.newaxis, :, :]
+        for j in range(5):
+            signal_masks.append(mask0[0] > 0.5)
+            mask0 = downsample(mask0, taper_edge=False)
+        v_map_masked = [v_map[j] * signal_masks[j] for j in range(5)]
+        masked_values = np.concatenate([
+            v_map[j][signal_masks[j]].ravel() for j in range(5)
+            if signal_masks[j].any()
+        ])
+        masked_values = masked_values[np.isfinite(masked_values) & (masked_values > 0)]
+        logger.info(
+            "Using original sparsery peak threshold %2.2f "
+            "(base %2.2f * threshold_scaling %2.2f); %d masked map pixels available for diagnostics" %
+            (peak_threshold, peak_threshold_unscaled, threshold_scaling, masked_values.size)
+        )
+    if peak_candidate_mask is not None:
+        candidate_masks = []
+        mask0 = peak_candidate_mask.astype(np.float32)[np.newaxis, :, :]
+        for j in range(5):
+            candidate_masks.append(mask0[0] > 0.5)
+            mask0 = downsample(mask0, taper_edge=False)
     movu = [movu0.reshape(movu0.shape[0], -1) for movu0 in movu]
 
     mov = np.reshape(mov, (-1, Lyc * Lxc))
@@ -590,26 +634,69 @@ def sparsery(mov, sdmov, highpass_neuropil,
     patches = []
     seeds = []
     extract_patches = False
+    min_roi_pixels = int(min_roi_pixels or 0)
+    max_roi_pixels = int(max_roi_pixels or 0)
+    min_roi_width = int(min_roi_width or 0)
+    max_roi_width = int(max_roi_width or 0)
+    min_roi_height = int(min_roi_height or 0)
+    max_roi_height = int(max_roi_height or 0)
+    n_rejected_size = {
+        "min_pixels": 0,
+        "max_pixels": 0,
+        "min_width": 0,
+        "max_width": 0,
+        "min_height": 0,
+        "max_height": 0,
+    }
 
-    logger.info(f"max_ROIs set to {max_ROIs} - will run for {max_ROIs} ROIs or until no more ROIs above threshold are found.")
+    def roi_size_rejection_reason(ypix, xpix):
+        npix = ypix.size
+        width = int(np.max(xpix) - np.min(xpix) + 1)
+        height = int(np.max(ypix) - np.min(ypix) + 1)
+        if min_roi_pixels > 0 and npix < min_roi_pixels:
+            return "min_pixels"
+        if max_roi_pixels > 0 and npix > max_roi_pixels:
+            return "max_pixels"
+        if min_roi_width > 0 and width < min_roi_width:
+            return "min_width"
+        if max_roi_width > 0 and width > max_roi_width:
+            return "max_width"
+        if min_roi_height > 0 and height < min_roi_height:
+            return "min_height"
+        if max_roi_height > 0 and height > max_roi_height:
+            return "max_height"
+        return None
+
+    def rejection_summary():
+        return ", ".join(f"{key}={value}" for key, value in n_rejected_size.items())
+
+    max_peaks_to_check = int(max_peaks_to_check or 20000)
+    logger.info(
+        f"max_ROIs set to {max_ROIs}; max_peaks_to_check set to {max_peaks_to_check} "
+        "- will stop when either limit is reached or no peaks remain above threshold."
+    )
     t0 = time.time()
-    for tj in range(max_ROIs):
+    tj = 0
+    stopped_by_peak_limit = False
+    while len(stats) < max_ROIs and tj < max_peaks_to_check:
         # find peaks in stddev"s
-        v0max = np.array([V1[j].max() for j in range(5)])
+        if candidate_masks is None:
+            V1_peak = V1
+        else:
+            V1_peak = [V1[j] * candidate_masks[j] for j in range(5)]
+        v0max = np.array([V1_peak[j].max() for j in range(5)])
         imap = np.argmax(v0max)
-        imax = np.argmax(V1[imap])
+        imax = np.argmax(V1_peak[imap])
         yi, xi = np.unravel_index(imax, (Lyp[imap], Lxp[imap]))
         # position of peak
         yi, xi = gxy[imap][1, yi, xi], gxy[imap][0, yi, xi]
         med = [int(yi), int(xi)]
 
         # check if peak is larger than threshold * max(1,nbinned/1200)
-        v_max[tj] = v0max.max()
-        if v_max[tj] < vmultiplier * Th2:
+        peak_score = v0max.max()
+        if peak_score < peak_threshold:
             break
         ls = lxs[imap]
-
-        ihop[tj] = imap
 
         # make square of initial pixels based on spatial scale of peak
         yi, xi = int(yi), int(xi)
@@ -647,8 +734,8 @@ def sparsery(mov, sdmov, highpass_neuropil,
             break
 
         # check if ROI should be split
-        v_split[tj], ipack = two_comps(mov[:, ypix0 * Lxc + xpix0], lam0, threshold)
-        if v_split[tj] > 1.25:
+        split_score, ipack = two_comps(mov[:, ypix0 * Lxc + xpix0], lam0, threshold)
+        if split_score > 1.25:
             lam0, xp, active_frames = ipack
             tproj[active_frames] = xp
             ix = lam0 > lam0.max() / 5
@@ -659,6 +746,8 @@ def sparsery(mov, sdmov, highpass_neuropil,
             xmed = np.median(xpix0)
             imin = np.argmin((xpix0 - xmed)**2 + (ypix0 - ymed)**2)
             med = [ypix0[imin], xpix0[imin]]
+
+        rejection_reason = roi_size_rejection_reason(ypix0, xpix0)
 
         # update residual on raw movie
         mov[np.ix_(active_frames,
@@ -671,28 +760,64 @@ def sparsery(mov, sdmov, highpass_neuropil,
             Mx = movu[j][:, xs[j] + Lxp[j] * ys[j]]
             V1[j][ys[j], xs[j]] = (Mx**2 * np.float32(Mx > threshold)).sum(axis=0)**.5
 
-        stats.append({
-            "ypix": ypix0.astype(int),
-            "xpix": xpix0.astype(int),
-            "lam": lam0 * sdmov[ypix0, xpix0],
-            "med": med,
-            "footprint": ihop[tj]
-        })
+        if rejection_reason is None:
+            accepted = len(stats)
+            v_max[accepted] = peak_score
+            ihop[accepted] = imap
+            v_split[accepted] = split_score
+            stats.append({
+                "ypix": ypix0.astype(int),
+                "xpix": xpix0.astype(int),
+                "lam": lam0 * sdmov[ypix0, xpix0],
+                "med": med,
+                "footprint": imap
+            })
+        else:
+            n_rejected_size[rejection_reason] += 1
 
         if tj % 500 == 0:
             t1 = time.time() - t0
-            logger.info(f"ROIs: {tj},\t last score: {v_max[tj]:0.4f}, \t time: {t1:0.2f}sec")
+            logger.info(
+                f"ROIs: {len(stats)}, candidates: {tj},\t "
+                f"current peak score: {peak_score:0.4f}, "
+                f"minimum peak score: {peak_threshold:0.4f}, "
+                f"time: {t1:0.2f}sec, "
+                f"size rejected: {rejection_summary()}"
+            )
+        tj += 1
 
+    if len(stats) < max_ROIs and tj >= max_peaks_to_check:
+        stopped_by_peak_limit = True
+        logger.info(
+            f"Stopped sparsery after checking max_peaks_to_check={max_peaks_to_check}; "
+            f"accepted {len(stats)}/{max_ROIs} ROIs"
+        )
+
+    if any(n_rejected_size.values()):
+        logger.info(
+            "Rejected sparsery candidates outside ROI size limits: "
+            + rejection_summary()
+        )
 
     new_settings = {
         "Vmax": v_max,
         "ihop": ihop,
         "Vsplit": v_split,
         "Vcorr": v_corr,
+        "Vcorr_scales": I.astype(np.float32, copy=False),
+        "Vcorr_signal_scales": I_for_threshold.astype(np.float32, copy=False),
+        "signal_peak_threshold": peak_threshold,
+        "signal_peak_threshold_unscaled": peak_threshold_unscaled,
+        "n_sparsery_candidates": tj,
+        "max_peaks_to_check": max_peaks_to_check,
+        "sparsery_stopped_by_peak_limit": stopped_by_peak_limit,
+        "n_sparsery_rejected_size": n_rejected_size,
         "Vmap": np.asanyarray(
             v_map, dtype="object"
         ),  # needed so that scipy.io.savemat doesn"t fail in runpipeline with latest numpy (v1.24.3). dtype="object" is needed to have numpy array with elements having diff sizes
         "spatscale_pix": spatscale_pix,
     }
+    if v_map_masked is not None:
+        new_settings["Vmap_signal"] = np.asanyarray(v_map_masked, dtype="object")
 
     return new_settings, stats

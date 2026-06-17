@@ -97,10 +97,10 @@ def make_masks_and_enable_buttons(parent):
 
     parent.p1.setAspectLocked(lock=True, ratio=parent.xyrat)
     parent.p2.setAspectLocked(lock=True, ratio=parent.xyrat)
-    #parent.p2.setXLink(parent.p1)
-    #parent.p2.setYLink(parent.p1)
+    graphics.reset_image_view(parent)
     parent.loaded = True
     parent.mode_change(2)
+    graphics.reset_image_view(parent)
     parent.show()
     # no classifier loaded
     classgui.activate(parent, False)
@@ -117,13 +117,16 @@ def enable_views_and_classifier(parent):
         if b == 0:
             parent.viewbtns.button(b).setChecked(True)
             parent.viewbtns.button(b).setStyleSheet(parent.stylePressed)
+    if "meanImg_signal_mask" not in parent.ops:
+        parent.viewbtns.button(4).setEnabled(False)
+        parent.viewbtns.button(4).setStyleSheet(parent.styleInactive)
     # check for second channel
     if "meanImg_chan2_corrected" not in parent.ops:
-        parent.viewbtns.button(5).setEnabled(False)
-        parent.viewbtns.button(5).setStyleSheet(parent.styleInactive)
+        parent.viewbtns.button(6).setEnabled(False)
+        parent.viewbtns.button(6).setStyleSheet(parent.styleInactive)
         if "meanImg_chan2" not in parent.ops:
-            parent.viewbtns.button(6).setEnabled(False)
-            parent.viewbtns.button(6).setStyleSheet(parent.styleInactive)
+            parent.viewbtns.button(7).setEnabled(False)
+            parent.viewbtns.button(7).setStyleSheet(parent.styleInactive)
 
     for b in range(len(parent.color_names)):
         if b == 5:
@@ -267,6 +270,16 @@ def load_files(name):
         noops = True
         try:
             ops = np.load(os.path.join(basename, "ops.npy"), allow_pickle=True).item()
+            try:
+                reg_outputs = np.load(basename + "/reg_outputs.npy", allow_pickle=True).item()
+                ops = {**ops, **reg_outputs}
+            except:
+                pass
+            try:
+                detect_outputs = np.load(basename + "/detect_outputs.npy", allow_pickle=True).item()
+                ops = {**ops, **detect_outputs}
+            except:
+                pass
             noops = False
         except:
             noops = True

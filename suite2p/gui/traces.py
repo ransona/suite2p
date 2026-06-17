@@ -6,6 +6,13 @@ from qtpy import QtGui, QtCore
 from qtpy.QtWidgets import QLabel, QComboBox, QPushButton, QLineEdit, QCheckBox
 
 
+def _trace_x(parent, y):
+    """Return an x-axis vector matching the trace length."""
+    if getattr(parent, "trange", None) is not None and parent.trange.size == y.size:
+        return parent.trange
+    return np.arange(y.size)
+
+
 def plot_trace(parent):
     parent.p3.clear()
     ax = parent.p3.getAxis("left")
@@ -21,16 +28,17 @@ def plot_trace(parent):
             fmax = np.maximum(f.max(), fneu.max())
             fmin = np.minimum(f.min(), fneu.min())
         #sp from 0 to fmax
-        sp /= sp.max()
+        if sp.max() > 0:
+            sp /= sp.max()
         #agus
         sp *= fmax - fmin
         #sp += fmin*0.95
         if parent.tracesOn:
-            parent.p3.plot(parent.trange, f, pen="c")
+            parent.p3.plot(_trace_x(parent, f), f, pen="c")
         if parent.neuropilOn:
-            parent.p3.plot(parent.trange, fneu, pen="r")
+            parent.p3.plot(_trace_x(parent, fneu), fneu, pen="r")
         if parent.deconvOn:
-            parent.p3.plot(parent.trange, (sp + fmin), pen=(255, 255, 255, 150))
+            parent.p3.plot(_trace_x(parent, sp), (sp + fmin), pen=(255, 255, 255, 150))
         parent.fmin = fmin
         parent.fmax = fmax
         ax.setTicks(None)
@@ -56,7 +64,7 @@ def plot_trace(parent):
             fmin = f.min()
             f = (f - fmin) / (fmax - fmin)
             rgb = parent.colors["cols"][0][n, :]
-            parent.p3.plot(parent.trange, f + k * kspace, pen=rgb)
+            parent.p3.plot(_trace_x(parent, f), f + k * kspace, pen=rgb)
             ttick.append((k * kspace + f.mean(), str(n)))
             k -= 1
         bsc = len(pmerge) / 25 + 1
@@ -65,10 +73,10 @@ def plot_trace(parent):
         # at bottom plot behavior and avg trace
         parent.fmin = 0
         if len(pmerge) > 5:
-            parent.p3.plot(parent.trange, -1 * bsc + favg * bsc, pen=(140, 140, 140))
+            parent.p3.plot(_trace_x(parent, favg), -1 * bsc + favg * bsc, pen=(140, 140, 140))
             parent.fmin = -1 * bsc
         if parent.bloaded:
-            parent.p3.plot(parent.trange, -1 * bsc + favg * bsc, pen=(140, 140, 140))
+            parent.p3.plot(_trace_x(parent, favg), -1 * bsc + favg * bsc, pen=(140, 140, 140))
             parent.p3.plot(parent.beh_time, -1 * bsc + parent.beh * bsc, pen="w")
             parent.fmin = -1 * bsc
             #parent.traceLabel[0].setText("<font color="gray">mean activity</font>")
