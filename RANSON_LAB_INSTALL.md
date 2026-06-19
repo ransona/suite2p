@@ -20,6 +20,89 @@ python -m pip install "suite2p[gui,io] @ git+https://github.com/ransona/suite2p.
 This installs Suite2p and its GUI and input/output dependencies. Cloning the
 repository is not required for normal use.
 
+## Current Ubuntu Server GPU Installation
+
+This section records the working Ranson Lab server configuration as of
+2026-06-19. Update the versions and commands here when the server driver or
+software stack changes.
+
+The tested server configuration is:
+
+- Ubuntu 24.04.4 LTS, x86_64
+- Linux kernel 6.17.0-29-generic
+- Two NVIDIA GeForce RTX 4090 GPUs (compute capability 8.9)
+- NVIDIA driver 580.159.04
+- CUDA 13.0 reported by `nvidia-smi`
+- Python 3.11.15
+- Torch 2.12.0 with CUDA 13.0 (`2.12.0+cu130`)
+- torchvision 0.27.0
+- Triton 3.7.0
+- cuDNN 9.20.0
+
+For a new environment on this server, use the following sequence instead of
+allowing pip to choose its default Torch build:
+
+```bash
+conda create --name suite2p_lab python=3.11 -y
+conda activate suite2p_lab
+python -m pip install --upgrade pip
+
+python -m pip install \
+    torch==2.12.0 \
+    torchvision==0.27.0 \
+    --index-url https://download.pytorch.org/whl/cu130
+
+python -m pip install "suite2p[gui,io] @ git+https://github.com/ransona/suite2p.git@main"
+```
+
+The PyTorch CUDA wheel installs its required CUDA 13 runtime libraries inside
+the Conda environment. A separate system CUDA toolkit is not required for
+normal Suite2p use, but the host NVIDIA driver must support this CUDA build.
+The current server uses driver 580.159.04.
+
+Confirm the host driver before installation:
+
+```bash
+nvidia-smi
+```
+
+After installation, verify the exact Torch build and execute an operation on
+the GPU:
+
+```bash
+python - <<'PY'
+import torch
+
+print("Torch:", torch.__version__)
+print("Torch CUDA runtime:", torch.version.cuda)
+print("cuDNN:", torch.backends.cudnn.version())
+print("CUDA available:", torch.cuda.is_available())
+print("GPU count:", torch.cuda.device_count())
+for index in range(torch.cuda.device_count()):
+    print(index, torch.cuda.get_device_name(index), torch.cuda.get_device_capability(index))
+
+assert torch.__version__ == "2.12.0+cu130"
+assert torch.version.cuda == "13.0"
+assert torch.cuda.is_available()
+value = (torch.ones(1024, device="cuda") * 2).sum().item()
+assert value == 2048
+print("CUDA tensor test passed")
+PY
+```
+
+Expected key output on the current server is:
+
+```text
+Torch: 2.12.0+cu130
+Torch CUDA runtime: 13.0
+CUDA available: True
+GPU count: 2
+CUDA tensor test passed
+```
+
+The NVIDIA runtime packages, Triton, and cuDNN are dependencies of the pinned
+Torch wheel and should not normally be installed or pinned individually.
+
 Start the GUI with:
 
 ```bash
