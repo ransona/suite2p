@@ -46,6 +46,10 @@ Carsen Stringer, Chris Ki, Nicholas Del Grosso, Paul LaFosse, Qingqing Zhang, Ma
 
 ## Local installation (< 2 minutes)
 
+> **Ranson Lab users:** follow [RANSON_LAB_INSTALL.md](RANSON_LAB_INSTALL.md)
+> to install this repository's customized Suite2p version. The upstream commands
+> below that use PyPI or `MouseLand/suite2p` do not install the lab version.
+
 You can install cellpose using conda or with native python if you have python3.8+ on your machine. 
 
 ### System requirements

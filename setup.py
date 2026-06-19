@@ -73,7 +73,7 @@ try:
     a = torch.ones(2, 3)
     major_version, minor_version, _ = torch.__version__.split(".")
     if major_version == "2" or int(minor_version) >= 6:
-        install_deps.remove("torch>=1.6")
+        install_deps.remove("torch>=1.13.1")
 except:
     pass
 
