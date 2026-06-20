@@ -100,10 +100,7 @@ class ViewBox(pg.ViewBox):
                     self.parent.update_plot()
 
     def zoom_plot(self):
-        self.setXRange(0, self.parent.ops["Lx"])
-        self.setYRange(0, self.parent.ops["Ly"])
-        self.parent.p2.setXLink(self.parent.p1)
-        self.parent.p2.setYLink(self.parent.p1)
+        reset_image_view(self.parent)
         self.parent.show()
 
 
@@ -111,25 +108,53 @@ def synchronize_views(parent):
     """Keep the two main image panes at the same pan/zoom range."""
     parent.p2.setXLink(parent.p1)
     parent.p2.setYLink(parent.p1)
-
-    if getattr(parent, "_view_sync_connected", False):
-        return
-
     parent._view_sync_connected = True
     parent._syncing_view_range = False
 
-    def sync_range(source, target):
-        if parent._syncing_view_range:
-            return
-        parent._syncing_view_range = True
-        try:
-            view_range = source.viewRange()
-            target.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
-        finally:
-            parent._syncing_view_range = False
 
-    parent.p1.sigRangeChanged.connect(lambda *_: sync_range(parent.p1, parent.p2))
-    parent.p2.sigRangeChanged.connect(lambda *_: sync_range(parent.p2, parent.p1))
+def configure_image_view_aspect(parent, mode=None):
+    """Lock aspect only for panes that are visible in the selected mode."""
+    if mode is None:
+        mode = parent.sizebtns.checkedId()
+    if mode == -1:
+        parent.p1.setAspectLocked(lock=False)
+        parent.p2.setAspectLocked(lock=False)
+        return
+    ratio = getattr(parent, "xyrat", 1.0)
+    parent.p1.setAspectLocked(lock=mode != 2, ratio=ratio)
+    parent.p2.setAspectLocked(lock=mode != 0, ratio=ratio)
+
+
+def set_shared_image_range(parent, x_range, y_range, mode=None):
+    if mode is None:
+        mode = parent.sizebtns.checkedId()
+    configure_image_view_aspect(parent, mode)
+    parent._syncing_view_range = True
+    try:
+        parent.p2.setXLink(None)
+        parent.p2.setYLink(None)
+        source = parent.p2 if mode == 2 else parent.p1
+        target = parent.p1 if mode == 2 else parent.p2
+        source.setRange(xRange=x_range, yRange=y_range, padding=0)
+        fitted_range = source.viewRange()
+        target.setRange(xRange=fitted_range[0], yRange=fitted_range[1], padding=0)
+    finally:
+        parent.p2.setXLink(parent.p1)
+        parent.p2.setYLink(parent.p1)
+        parent._syncing_view_range = False
+
+
+def restore_image_range_after_layout(parent, x_range, y_range, mode):
+    """Restore a range after pane visibility changes have resized the layout."""
+    parent.p1.setAspectLocked(lock=False)
+    parent.p2.setAspectLocked(lock=False)
+    set_shared_image_range(parent, x_range, y_range, mode=-1)
+
+    def restore():
+        if getattr(parent, "loaded", False) and parent.sizebtns.checkedId() == mode:
+            set_shared_image_range(parent, x_range, y_range, mode=mode)
+
+    QtCore.QTimer.singleShot(0, restore)
 
 
 def reset_image_view(parent):
@@ -141,17 +166,16 @@ def reset_image_view(parent):
         viewbox.setLimits(xMin=-xpad, xMax=parent.ops["Lx"] + xpad,
                           yMin=-ypad, yMax=parent.ops["Ly"] + ypad)
 
-    parent._syncing_view_range = True
-    try:
-        parent.p1.setRange(xRange=(0, parent.ops["Lx"]),
-                           yRange=(0, parent.ops["Ly"]),
-                           padding=0)
-        parent.p2.setRange(xRange=(0, parent.ops["Lx"]),
-                           yRange=(0, parent.ops["Ly"]),
-                           padding=0)
-    finally:
-        parent._syncing_view_range = False
+    set_shared_image_range(parent, (0, parent.ops["Lx"]),
+                           (0, parent.ops["Ly"]))
     synchronize_views(parent)
+
+
+def reset_image_view_after_layout(parent):
+    QtCore.QTimer.singleShot(
+        0,
+        lambda: reset_image_view(parent) if getattr(parent, "loaded", False) else None,
+    )
 
 
 def init_range(parent):

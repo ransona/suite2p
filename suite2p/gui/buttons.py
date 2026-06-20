@@ -5,6 +5,8 @@ import numpy as np
 from qtpy import QtGui, QtCore
 from qtpy.QtWidgets import QPushButton, QButtonGroup, QLabel, QLineEdit
 
+from . import graphics
+
 
 def make_selection(parent):
     """ buttons to draw a square on view """
@@ -148,14 +150,17 @@ class SizeButton(QPushButton):
             parent.win.ci.layout.setColumnStretchFactor(1, ts)
         parent.p2.setXLink("plot1")
         parent.p2.setYLink("plot1")
-        if hasattr(parent, "_syncing_view_range"):
-            parent._syncing_view_range = True
-        try:
-            parent.p1.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
-            parent.p2.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
-        finally:
-            if hasattr(parent, "_syncing_view_range"):
-                parent._syncing_view_range = False
+        if parent.loaded:
+            contains_full_frame = (
+                view_range[0][0] <= 0 <= parent.ops["Lx"] <= view_range[0][1]
+                and view_range[1][0] <= 0 <= parent.ops["Ly"] <= view_range[1][1]
+            )
+            if contains_full_frame:
+                view_range = ((0, parent.ops["Lx"]), (0, parent.ops["Ly"]))
+            graphics.restore_image_range_after_layout(
+                parent, view_range[0], view_range[1], bid)
+        else:
+            graphics.configure_image_view_aspect(parent, bid)
         # only enable selection buttons when not in "both" view
         if bid != 1:
             if parent.ops_plot["color"] != 0:

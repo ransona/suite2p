@@ -102,6 +102,7 @@ def make_masks_and_enable_buttons(parent):
     parent.mode_change(2)
     graphics.reset_image_view(parent)
     parent.show()
+    graphics.reset_image_view_after_layout(parent)
     # no classifier loaded
     classgui.activate(parent, False)
 
@@ -345,6 +346,7 @@ def load_proc(parent):
 
 
 def load_to_GUI(parent, basename, procs):
+    parent.loaded = False
     stat, ops, Fcell, Fneu, Spks, iscell, probcell, redcell, probredcell, hasred = procs
     parent.basename = basename
     parent.stat = stat

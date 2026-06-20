@@ -2,13 +2,24 @@
 
 This file records functional changes made in this local fork/branch of Suite2p.
 
+## 2026-06-20
+
+### Reliable full-frame GUI loading
+
+- Marked the GUI unloaded while replacing experiment data so controls cannot redraw using stale state from the previous experiment.
+- Deferred the final full-frame fit until Qt has completed the pane layout.
+- Disabled aspect locking for hidden image panes so a near-zero-width hidden pane cannot create and later propagate a cropped range.
+- Temporarily unlinked panes while fitting a range, then copied the visible pane's aspect-correct range and restored PyQtGraph linking.
+- Refit from the actual frame bounds when switching pane modes from a full-frame view, while preserving the center of genuinely zoomed views.
+- Removed redundant manual range-change callbacks and retained PyQtGraph's linked-view synchronization to prevent hidden-pane feedback.
+
 ## 2026-06-17
 
 ### Main GUI left/right pane synchronization
 
 - Kept the main ROI GUI left and right image panes synchronized for pan and zoom changes.
 - Removed the behavior where choosing left-only or right-only pane sizes unlinked the hidden pane.
-- Added explicit two-way range synchronization so changes made from either pane are mirrored to the other pane.
+- Used PyQtGraph linked-view synchronization so changes made from either pane are mirrored to the other pane.
 - Reset the main image panes to the full frame after loading an experiment and use padded pan limits so aspect-locked zoom-out can still show the full image.
 - Re-applied the full-frame reset after the load-time activity-mode redraw, so loading starts with the whole frame visible.
 - Fixed the `cells` / `both` / `not cells` buttons so the selected mode is highlighted and switching modes preserves the current pan/zoom range.
