@@ -344,6 +344,7 @@ class ROIDraw(QMainWindow):
 
             mimg = np.zeros((self.Ly, self.Lx), np.float32)
             if src is not None:
+                src = np.asarray(src, dtype=np.float32)
                 mimg1 = np.percentile(src, 1)
                 mimg99 = np.percentile(src, 99)
                 if mimg99 > mimg1:
