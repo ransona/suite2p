@@ -44,7 +44,7 @@ Carsen Stringer, Chris Ki, Nicholas Del Grosso, Paul LaFosse, Qingqing Zhang, Ma
 
 ## Read the Documentation at https://suite2p.readthedocs.io/
 
-## Local installation (< 2 minutes)
+## Local installation (to be used for roi curation & for running suite2p for intra-experiment analysis on mesoscope)
 
 > **Ranson Lab users:** follow [RANSON_LAB_INSTALL.md](RANSON_LAB_INSTALL.md)
 > to install this repository's customized Suite2p version. The upstream commands
