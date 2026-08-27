@@ -5,7 +5,7 @@ from qtpy import QtGui
 from qtpy.QtWidgets import QAction, QMenu
 from importlib.metadata import entry_points
 
-from . import reggui, drawroi, merge, io, rungui, visualize, classgui
+from . import reggui, drawroi, rapidroi, merge, io, rungui, visualize, classgui
 from suite2p.io.nwb import save_nwb
 from suite2p.io.utils import get_suite2p_path
 
@@ -66,6 +66,9 @@ def mainmenu(parent):
     parent.manual = QAction("Manual labelling", parent)
     parent.manual.triggered.connect(lambda: manual_label(parent))
     parent.manual.setEnabled(False)
+    parent.rapid_rois = QAction("Rapid ROIs", parent)
+    parent.rapid_rois.triggered.connect(lambda: rapid_label(parent))
+    parent.rapid_rois.setEnabled(False)
 
     # make mainmenu!
     main_menu = parent.menuBar()
@@ -79,6 +82,7 @@ def mainmenu(parent):
     file_menu.addAction(parent.saveMat)
     file_menu.addAction(exportFig)
     file_menu.addAction(parent.manual)
+    file_menu.addAction(parent.rapid_rois)
 
 
 def classifier(parent):
@@ -193,6 +197,11 @@ def run_suite2p(parent):
 def manual_label(parent):
     MW = drawroi.ROIDraw(parent)
     MW.show()
+
+
+def rapid_label(parent):
+    parent.rapid_roi_window = rapidroi.RapidROIWindow(parent)
+    parent.rapid_roi_window.show()
 
 
 def vis_window(parent):

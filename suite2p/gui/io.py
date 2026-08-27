@@ -35,6 +35,7 @@ def make_masks_and_enable_buttons(parent):
     parent.saveMerge.setEnabled(True)
     parent.sugMerge.setEnabled(True)
     parent.manual.setEnabled(True)
+    parent.rapid_rois.setEnabled(True)
     parent.bloaded = False
     parent.ROI_remove()
     parent.isROI = False
