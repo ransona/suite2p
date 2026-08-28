@@ -371,15 +371,20 @@ def load_to_GUI(parent, basename, procs):
         parent.probredcell = probredcell
     parent.hasred = hasred
     parent.notmerged = np.ones_like(parent.iscell).astype("bool")
+    missing_snr = [n for n, stat_entry in enumerate(parent.stat) if "snr" not in stat_entry]
+    if missing_snr:
+        dF = Fcell.copy() - 0.7 * Fneu
+        variance = dF.var(axis=1)
+        snr = 1 - 0.5 * np.divide(
+            np.diff(dF, axis=1).var(axis=1), variance,
+            out=np.zeros_like(variance), where=variance > 0,
+        )
+        del dF
+        for n in missing_snr:
+            parent.stat[n]["snr"] = snr[n]
     for n in range(len(parent.stat)):
         if parent.hasred:
             parent.stat[n]["chan2_prob"] = parent.probredcell[n]
-        if "snr" not in parent.stat[0]:
-            dF = Fcell.copy() - 0.7 * Fneu
-            snr = 1 - 0.5 * np.diff(dF, axis=1).var(axis=1) / dF.var(axis=1)        
-            del dF
-            for n in range(len(parent.stat)):
-                parent.stat[n]["snr"] = snr[n]
         parent.stat[n]["inmerge"] = 0
     parent.stat = np.array(parent.stat)
     make_masks_and_enable_buttons(parent)

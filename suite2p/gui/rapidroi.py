@@ -1,6 +1,7 @@
 """Fast manual ROI editor for adding many fixed circular or freehand ROIs."""
 import json
 import os
+import traceback
 import uuid
 from pathlib import Path
 
@@ -73,6 +74,16 @@ class RapidROIViewBox(pg.ViewBox):
             return
         super().mouseDragEvent(event, axis=axis)
 
+    def mouseMoveEvent(self, event):
+        point = self.mapSceneToView(event.scenePos())
+        self.editor.set_mouse_position(point.y(), point.x())
+        super().mouseMoveEvent(event)
+
+    def hoverEvent(self, event):
+        if event.isExit():
+            self.editor.mouse_position = None
+        super().hoverEvent(event)
+
 
 class RapidROIWindow(QMainWindow):
     VIEW_SPECS = (("W", "Mean", 1), ("E", "Enhanced mean", 2), ("R", "Correlation", 3),
@@ -89,6 +100,8 @@ class RapidROIWindow(QMainWindow):
         self.selected_ids = []
         self.current_parent_id = None
         self.current_segment = None
+        self._suppress_selection_zoom = False
+        self.mouse_position = None
         self.freehand_points = []
         self.extracted = False
         self.save_gui = False
@@ -96,6 +109,7 @@ class RapidROIWindow(QMainWindow):
         self.resize(1300, 900)
         self._load_saved_tree()
         self._build_ui()
+        self._install_zoom_shortcuts()
         self._refresh_tree()
         self.set_view(1)
 
@@ -139,12 +153,9 @@ class RapidROIWindow(QMainWindow):
         self.delete_button = QPushButton("Delete selected ROI(s) [Backspace]")
         self.delete_button.clicked.connect(self.delete_selected)
         left_layout.addWidget(self.delete_button)
-        self.extract_button = QPushButton("Extract ROIs")
-        self.extract_button.clicked.connect(self.extract_rois)
-        self.save_button = QPushButton("Save and Quit")
+        self.save_button = QPushButton("Save ROIs")
         self.save_button.setEnabled(False)
-        self.save_button.clicked.connect(self.save_and_quit)
-        left_layout.addWidget(self.extract_button)
+        self.save_button.clicked.connect(self.save_rois)
         left_layout.addWidget(self.save_button)
         layout.addWidget(left, 1)
 
@@ -155,6 +166,7 @@ class RapidROIWindow(QMainWindow):
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Click circles", "circle")
         self.mode_combo.addItem("Freehand shape", "freehand")
+        self.mode_combo.currentIndexChanged.connect(self._update_mode_status)
         controls.addWidget(self.mode_combo, 0, 1)
         controls.addWidget(QLabel("Circle diameter (pixels)"), 1, 0)
         self.diameter = QSpinBox()
@@ -195,10 +207,15 @@ class RapidROIWindow(QMainWindow):
         middle_layout.addWidget(self.status)
         self.graphics = pg.GraphicsLayoutWidget()
         middle_layout.addWidget(self.graphics, 1)
+        self.graphics.scene().sigMouseMoved.connect(self._scene_mouse_moved)
         self.viewbox = RapidROIViewBox(self)
         self.viewbox.setMouseEnabled(x=False, y=False)
         self.graphics.addItem(self.viewbox)
-        self.image = pg.ImageItem()
+        # Use conventional image coordinates locally: x is the image column and
+        # y is the image row. The main Suite2p GUI uses PyQtGraph's historic
+        # col-major convention, but this editor draws and stores ROI pixels in
+        # row-major NumPy coordinates.
+        self.image = pg.ImageItem(axisOrder="row-major")
         self.viewbox.addItem(self.image)
         self.preview = pg.PlotCurveItem(pen=pg.mkPen((0, 220, 255), width=1.5), connect="finite")
         self.selected_preview = pg.PlotCurveItem(pen=pg.mkPen((255, 220, 0), width=3), connect="finite")
@@ -211,6 +228,13 @@ class RapidROIWindow(QMainWindow):
     def draw_mode(self):
         return self.mode_combo.currentData()
 
+    def _update_mode_status(self):
+        messages = {
+            "circle": "Click the image to add circular ROIs.",
+            "freehand": "Freehand mode: drag on the image to draw an ROI shape.",
+        }
+        self.status.setText(messages[self.draw_mode()])
+
     def set_view(self, index):
         image = self.parent.views[index]
         self.image.setImage(image)
@@ -218,6 +242,42 @@ class RapidROIWindow(QMainWindow):
         if button is not None:
             button.setChecked(True)
         self._refresh_preview()
+
+    def set_mouse_position(self, y, x):
+        if 0 <= y < self.ly and 0 <= x < self.lx:
+            self.mouse_position = (y, x)
+        else:
+            self.mouse_position = None
+
+    def _scene_mouse_moved(self, scene_position):
+        point = self.viewbox.mapSceneToView(scene_position)
+        self.set_mouse_position(point.y(), point.x())
+
+    def _install_zoom_shortcuts(self):
+        shortcuts = (("X", lambda: self.zoom_at_mouse(0.8)),
+                     ("K", lambda: self.zoom_at_mouse(0.8)),
+                     ("Z", lambda: self.zoom_at_mouse(1.25)),
+                     ("C", self.zoom_out))
+        self.zoom_shortcuts = []
+        for key, action in shortcuts:
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
+            shortcut.setContext(QtCore.Qt.WindowShortcut)
+            shortcut.activated.connect(action)
+            self.zoom_shortcuts.append(shortcut)
+
+    def zoom_at_mouse(self, factor):
+        """Zoom by *factor* about the most recent in-image mouse position."""
+        if self.mouse_position is None:
+            return
+        y, x = self.mouse_position
+        (x0, x1), (y0, y1) = self.viewbox.viewRange()
+        width, height = (x1 - x0) * factor, (y1 - y0) * factor
+        width, height = min(width, self.lx), min(height, self.ly)
+        new_x0 = np.clip(x - (x - x0) * factor, 0, self.lx - width)
+        new_y0 = np.clip(y - (y - y0) * factor, 0, self.ly - height)
+        self.viewbox.setRange(xRange=(new_x0, new_x0 + width), yRange=(new_y0, new_y0 + height), padding=0)
+        # This is a free zoom rather than one of the fixed 3x3 segments.
+        self.current_segment = None
 
     def _record_name(self, record):
         index = record.get("roi_index")
@@ -253,7 +313,8 @@ class RapidROIWindow(QMainWindow):
         items = self.tree.selectedItems()
         self.selected_ids = [item.data(0, QtCore.Qt.ItemDataRole.UserRole) for item in items]
         self.selected_id = self.tree.currentItem().data(0, QtCore.Qt.ItemDataRole.UserRole) if self.tree.currentItem() else None
-        self._ensure_selected_visible()
+        if not self._suppress_selection_zoom:
+            self._ensure_selected_visible()
         self._refresh_preview()
 
     def set_selected_as_root(self):
@@ -307,8 +368,12 @@ class RapidROIWindow(QMainWindow):
         self.selected_id = record["id"]
         self.selected_ids = [record["id"]]
         self.extracted = False
-        self.save_button.setEnabled(False)
+        self.save_button.setEnabled(True)
+        # A new ROI was placed in the currently visible image region. Re-select
+        # it in the list without triggering the list-selection segment jump.
+        self._suppress_selection_zoom = True
         self._refresh_tree()
+        self._suppress_selection_zoom = False
         self._refresh_preview()
 
     def _outline(self, record):
@@ -390,6 +455,7 @@ class RapidROIWindow(QMainWindow):
         if not deleted:
             QMessageBox.information(self, "Rapid ROIs", "Previously saved ROIs cannot be deleted in this editor.")
             return
+        self.save_button.setEnabled(bool(self.new_records))
         remaining_ids = [record_id for record_id in ordered_ids if record_id not in selected_ids]
         self.selected_id = remaining_ids[max(0, first_index - 1)] if remaining_ids else None
         self.selected_ids = [self.selected_id] if self.selected_id else []
@@ -434,7 +500,7 @@ class RapidROIWindow(QMainWindow):
     def extract_rois(self):
         if not self.new_records:
             QMessageBox.information(self, "Rapid ROIs", "Add at least one new ROI before extracting.")
-            return
+            return False
         progress = QProgressDialog("Preparing ROIs…", None, 0, 100, self)
         progress.setWindowTitle("Extracting rapid ROIs")
         progress.setWindowModality(QtCore.Qt.WindowModal)
@@ -445,7 +511,7 @@ class RapidROIWindow(QMainWindow):
 
         def report(value, message):
             progress.setLabelText(message)
-            progress.setValue(value)
+            progress.setValue(int(round(value)))
             QApplication.processEvents()
 
         try:
@@ -454,25 +520,32 @@ class RapidROIWindow(QMainWindow):
             if not os.path.isfile(self.parent.ops["reg_file"]):
                 self.parent.ops["reg_file"] = os.path.join(self.parent.basename, "data.bin")
             result = drawroi.masks_and_traces(self.parent.ops, stat, self.parent.stat, progress_callback=report)
-        except Exception:
+        except Exception as error:
             progress.close()
-            raise
+            traceback.print_exc()
+            message = f"Rapid ROI extraction failed: {error}"
+            self.status.setText(message)
+            QMessageBox.critical(self, "Rapid ROI extraction failed", message)
+            return False
         progress.setValue(100)
         progress.close()
         self.Fcell, self.Fneu, self.F_chan2, self.Fneu_chan2, self.Spks, _settings, self.new_stat = result
         self.extracted = True
-        self.save_button.setEnabled(True)
-        self.status.setText(f"Extracted {len(self.new_records)} rapid ROIs. Save and Quit writes standard Suite2p files.")
+        self.status.setText(f"Extracted and saving {len(self.new_records)} rapid ROIs…")
+        return True
+
+    def save_rois(self):
+        if not self.extracted and not self.extract_rois():
+            return
+        self.save_and_quit()
 
     def _save_tree(self):
-        offset = len(self.new_records)
+        existing_count = len(self.parent.stat)
         saved = []
         for record in self.records:
             output = {key: value for key, value in record.items() if key != "existing"}
-            if record.get("existing"):
-                output["roi_index"] = int(output["roi_index"]) + offset
-            else:
-                output["roi_index"] = self.new_records.index(record)
+            if not record.get("existing"):
+                output["roi_index"] = existing_count + self.new_records.index(record)
             saved.append(output)
         self.tree_path.write_text(json.dumps({"schema_version": 1, "rois": saved}, indent=2), encoding="utf-8")
 
@@ -481,20 +554,20 @@ class RapidROIWindow(QMainWindow):
             return
         basename = self.parent.basename
         np.save(os.path.join(basename, "stat_orig.npy"), self.parent.stat)
-        stat_all = np.concatenate((self.new_stat, self.parent.stat))
+        stat_all = np.concatenate((self.parent.stat, self.new_stat))
         np.save(os.path.join(basename, "stat.npy"), stat_all)
         old_iscell = np.column_stack((self.parent.iscell, self.parent.probcell))
-        np.save(os.path.join(basename, "iscell.npy"), np.concatenate((np.ones((len(self.new_records), 2)), old_iscell), axis=0))
-        np.save(os.path.join(basename, "F.npy"), np.concatenate((self.Fcell, self.parent.Fcell), axis=0))
-        np.save(os.path.join(basename, "Fneu.npy"), np.concatenate((self.Fneu, self.parent.Fneu), axis=0))
-        np.save(os.path.join(basename, "spks.npy"), np.concatenate((self.Spks, self.parent.Spks), axis=0))
+        np.save(os.path.join(basename, "iscell.npy"), np.concatenate((old_iscell, np.ones((len(self.new_records), 2))), axis=0))
+        np.save(os.path.join(basename, "F.npy"), np.concatenate((self.parent.Fcell, self.Fcell), axis=0))
+        np.save(os.path.join(basename, "Fneu.npy"), np.concatenate((self.parent.Fneu, self.Fneu), axis=0))
+        np.save(os.path.join(basename, "spks.npy"), np.concatenate((self.parent.Spks, self.Spks), axis=0))
         if "reg_file_chan2" in self.parent.ops:
             F_chan2 = np.load(os.path.join(basename, "F_chan2.npy"))
             Fneu_chan2 = np.load(os.path.join(basename, "Fneu_chan2.npy"))
             redcell = np.load(os.path.join(basename, "redcell.npy"))
-            np.save(os.path.join(basename, "F_chan2.npy"), np.concatenate((self.F_chan2, F_chan2), axis=0))
-            np.save(os.path.join(basename, "Fneu_chan2.npy"), np.concatenate((self.Fneu_chan2, Fneu_chan2), axis=0))
-            np.save(os.path.join(basename, "redcell.npy"), np.concatenate((np.zeros((len(self.new_records), 2)), redcell), axis=0))
+            np.save(os.path.join(basename, "F_chan2.npy"), np.concatenate((F_chan2, self.F_chan2), axis=0))
+            np.save(os.path.join(basename, "Fneu_chan2.npy"), np.concatenate((Fneu_chan2, self.Fneu_chan2), axis=0))
+            np.save(os.path.join(basename, "redcell.npy"), np.concatenate((redcell, np.zeros((len(self.new_records), 2))), axis=0))
         self._save_tree()
         io.load_proc(self.parent)
         self.save_gui = True

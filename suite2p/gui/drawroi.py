@@ -108,10 +108,16 @@ def masks_and_traces(settings, stat_manual, stat_orig, progress_callback=None):
     dF = F - settings["extraction"]["neuropil_coefficient"] * Fneu
     sk = stats.skew(dF, axis=1)
     sd = np.std(dF, axis=1)
+    variance = dF.var(axis=1)
+    snr = 1 - 0.5 * np.divide(
+        np.diff(dF, axis=1).var(axis=1), variance,
+        out=np.zeros_like(variance), where=variance > 0,
+    )
 
     for n in range(F.shape[0]):
         manual_roi_stats[n]["skew"] = sk[n]
         manual_roi_stats[n]["std"] = sd[n]
+        manual_roi_stats[n]["snr"] = snr[n]
         manual_roi_stats[n]["med"] = [
             np.mean(manual_roi_stats[n]["ypix"]),
             np.mean(manual_roi_stats[n]["xpix"])
