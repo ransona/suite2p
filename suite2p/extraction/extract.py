@@ -17,8 +17,8 @@ from .masks import create_masks
 from .. import default_settings
 from ..logger import TqdmToLogger
 
-def extract_traces(f_in, cell_masks, neuropil_masks, batch_size=500, 
-                    device = torch.device("cuda")):
+def extract_traces(f_in, cell_masks, neuropil_masks, batch_size=500,
+                   device=torch.device("cuda"), progress_callback=None):
     """
     Extract fluorescence traces using cell and neuropil masks.
 
@@ -95,6 +95,8 @@ def extract_traces(f_in, cell_masks, neuropil_masks, batch_size=500,
 
         F_batch = data @ cmasks
         F[:, tstart : tend] = F_batch.T.cpu().numpy()
+        if progress_callback is not None:
+            progress_callback(n + 1, n_batches)
         
     return F, Fneu
 

@@ -9,9 +9,10 @@ import pyqtgraph as pg
 from matplotlib.path import Path as MplPath
 from qtpy import QtCore, QtGui
 from qtpy.QtWidgets import (
+    QApplication, QAbstractItemView,
     QButtonGroup, QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QLabel,
-    QMainWindow, QMessageBox, QPushButton, QSpinBox, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QProgressDialog, QPushButton, QSpinBox, QTreeWidget,
+    QTreeWidgetItem, QTreeWidgetItemIterator, QVBoxLayout, QWidget,
 )
 
 from . import drawroi, io
@@ -85,13 +86,14 @@ class RapidROIWindow(QMainWindow):
         self.records = []
         self.new_records = []
         self.selected_id = None
+        self.selected_ids = []
         self.current_parent_id = None
         self.current_segment = None
         self.freehand_points = []
         self.extracted = False
         self.save_gui = False
         self.setWindowTitle("Suite2p Rapid ROIs")
-        self.resize(1550, 900)
+        self.resize(1300, 900)
         self._load_saved_tree()
         self._build_ui()
         self._refresh_tree()
@@ -125,6 +127,7 @@ class RapidROIWindow(QMainWindow):
         left_layout.addWidget(QLabel("ROIs / hierarchy"))
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["ROI"])
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.itemSelectionChanged.connect(self.tree_selection_changed)
         left_layout.addWidget(self.tree, 1)
         self.make_root_button = QPushButton("Set selected as root")
@@ -133,12 +136,16 @@ class RapidROIWindow(QMainWindow):
         self.make_child_button.clicked.connect(self.set_selected_as_parent)
         left_layout.addWidget(self.make_root_button)
         left_layout.addWidget(self.make_child_button)
-        self.parent_label = QLabel("New ROIs: flat list")
-        self.parent_label.setWordWrap(True)
-        left_layout.addWidget(self.parent_label)
-        self.delete_button = QPushButton("Delete selected ROI [Backspace]")
+        self.delete_button = QPushButton("Delete selected ROI(s) [Backspace]")
         self.delete_button.clicked.connect(self.delete_selected)
         left_layout.addWidget(self.delete_button)
+        self.extract_button = QPushButton("Extract ROIs")
+        self.extract_button.clicked.connect(self.extract_rois)
+        self.save_button = QPushButton("Save and Quit")
+        self.save_button.setEnabled(False)
+        self.save_button.clicked.connect(self.save_and_quit)
+        left_layout.addWidget(self.extract_button)
+        left_layout.addWidget(self.save_button)
         layout.addWidget(left, 1)
 
         middle = QWidget()
@@ -159,13 +166,29 @@ class RapidROIWindow(QMainWindow):
         view_box = QWidget()
         view_layout = QHBoxLayout(view_box)
         view_layout.setContentsMargins(0, 0, 0, 0)
-        for key, label, index in self.VIEW_SPECS:
+        for key, label, index in self.VIEW_SPECS[:3]:
             button = QPushButton(f"{key}: {label}")
             button.setCheckable(True)
             button.clicked.connect(lambda _checked=False, idx=index: self.set_view(idx))
             self.view_group.addButton(button, index)
             view_layout.addWidget(button)
-        controls.addWidget(view_box, 0, 3, 2, 1)
+        controls.addWidget(view_box, 0, 3)
+        controls.addWidget(QLabel("Zoom"), 1, 2)
+        zoom_box = QWidget()
+        zoom_layout = QGridLayout(zoom_box)
+        zoom_layout.setContentsMargins(0, 0, 0, 0)
+        zoom_layout.setSpacing(2)
+        for row in range(3):
+            for col in range(3):
+                button = QPushButton(str(row * 3 + col + 1))
+                button.setFixedSize(24, 22)
+                button.clicked.connect(lambda _checked=False, r=row, c=col: self.zoom_segment(r, c))
+                zoom_layout.addWidget(button, row, col)
+        zoom_out = QPushButton("Out")
+        zoom_out.setFixedHeight(22)
+        zoom_out.clicked.connect(self.zoom_out)
+        zoom_layout.addWidget(zoom_out, 3, 0, 1, 3)
+        controls.addWidget(zoom_box, 1, 3)
         middle_layout.addLayout(controls)
         self.status = QLabel("Click the image to add circular ROIs. Freehand mode: drag on the image.")
         self.status.setWordWrap(True)
@@ -185,29 +208,6 @@ class RapidROIWindow(QMainWindow):
         self.viewbox.addItem(self.drawing_preview)
         layout.addWidget(middle, 4)
 
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.addWidget(QLabel("Zoom segment"))
-        grid = QGridLayout()
-        for row in range(3):
-            for col in range(3):
-                button = QPushButton(f"{row + 1},{col + 1}")
-                button.clicked.connect(lambda _checked=False, r=row, c=col: self.zoom_segment(r, c))
-                grid.addWidget(button, row, col)
-        right_layout.addLayout(grid)
-        zoom_out = QPushButton("Zoom out")
-        zoom_out.clicked.connect(self.zoom_out)
-        right_layout.addWidget(zoom_out)
-        right_layout.addStretch(1)
-        self.extract_button = QPushButton("Extract ROIs")
-        self.extract_button.clicked.connect(self.extract_rois)
-        self.save_button = QPushButton("Save and Quit")
-        self.save_button.setEnabled(False)
-        self.save_button.clicked.connect(self.save_and_quit)
-        right_layout.addWidget(self.extract_button)
-        right_layout.addWidget(self.save_button)
-        layout.addWidget(right, 1)
-
     def draw_mode(self):
         return self.mode_combo.currentData()
 
@@ -225,6 +225,7 @@ class RapidROIWindow(QMainWindow):
         return f"ROI {suffix} ({record['shape']})"
 
     def _refresh_tree(self):
+        selected_ids = set(self.selected_ids)
         selected_id = self.selected_id
         self.tree.clear()
         by_parent = {}
@@ -239,26 +240,19 @@ class RapidROIWindow(QMainWindow):
                 parent_item.addChild(item)
                 add_records(item, record["id"])
                 item.setExpanded(True)
+                if record["id"] in selected_ids:
+                    item.setSelected(True)
                 if record["id"] == selected_id:
                     self.tree.setCurrentItem(item)
 
         add_records(self.tree.invisibleRootItem(), None)
-        self._update_parent_label()
-
-    def _update_parent_label(self):
-        if not self.hierarchy_enabled.isChecked():
-            self.parent_label.setText("New ROIs: flat list")
-        elif self.current_parent_id is None:
-            self.parent_label.setText("New ROIs: roots")
-        else:
-            self.parent_label.setText(f"New ROIs: children of {self.current_parent_id[:8]}")
-
     def _record(self, record_id):
         return next((record for record in self.records if record["id"] == record_id), None)
 
     def tree_selection_changed(self):
-        item = self.tree.currentItem()
-        self.selected_id = item.data(0, QtCore.Qt.ItemDataRole.UserRole) if item else None
+        items = self.tree.selectedItems()
+        self.selected_ids = [item.data(0, QtCore.Qt.ItemDataRole.UserRole) for item in items]
+        self.selected_id = self.tree.currentItem().data(0, QtCore.Qt.ItemDataRole.UserRole) if self.tree.currentItem() else None
         self._ensure_selected_visible()
         self._refresh_preview()
 
@@ -276,7 +270,6 @@ class RapidROIWindow(QMainWindow):
             return
         self.hierarchy_enabled.setChecked(True)
         self.current_parent_id = record["id"]
-        self._update_parent_label()
 
     def add_circle(self, center_y, center_x):
         record = {
@@ -312,6 +305,7 @@ class RapidROIWindow(QMainWindow):
         self.records.append(record)
         self.new_records.append(record)
         self.selected_id = record["id"]
+        self.selected_ids = [record["id"]]
         self.extracted = False
         self.save_button.setEnabled(False)
         self._refresh_tree()
@@ -334,12 +328,14 @@ class RapidROIWindow(QMainWindow):
             xs.extend(x); xs.append(np.nan)
             ys.extend(y); ys.append(np.nan)
         self.preview.setData(xs, ys)
-        selected = self._record(self.selected_id)
-        if selected is None:
-            self.selected_preview.setData([], [])
-        else:
-            x, y = self._outline(selected)
-            self.selected_preview.setData(x, y)
+        xs, ys = [], []
+        for record_id in self.selected_ids:
+            selected = self._record(record_id)
+            if selected is not None:
+                x, y = self._outline(selected)
+                xs.extend(x); xs.append(np.nan)
+                ys.extend(y); ys.append(np.nan)
+        self.selected_preview.setData(xs, ys)
 
     def _refresh_drawing_preview(self):
         if not self.freehand_points:
@@ -374,21 +370,41 @@ class RapidROIWindow(QMainWindow):
             self.zoom_segment(*segment)
 
     def delete_selected(self):
-        record = self._record(self.selected_id)
-        if record is None:
+        items = self.tree.selectedItems()
+        if not items:
             return
-        if record.get("existing"):
+        ordered_ids = [item.data(0, QtCore.Qt.ItemDataRole.UserRole) for item in self._tree_items()]
+        selected_ids = {item.data(0, QtCore.Qt.ItemDataRole.UserRole) for item in items}
+        first_index = min(ordered_ids.index(record_id) for record_id in selected_ids)
+        deleted = 0
+        for record_id in selected_ids:
+            record = self._record(record_id)
+            if record is None or record.get("existing"):
+                continue
+            for child in self.records:
+                if child.get("parent_id") == record["id"]:
+                    child["parent_id"] = None
+            self.records.remove(record)
+            self.new_records.remove(record)
+            deleted += 1
+        if not deleted:
             QMessageBox.information(self, "Rapid ROIs", "Previously saved ROIs cannot be deleted in this editor.")
             return
-        for child in self.records:
-            if child.get("parent_id") == record["id"]:
-                child["parent_id"] = None
-        self.records.remove(record)
-        self.new_records.remove(record)
-        self.selected_id = None
-        self.current_parent_id = None if self.current_parent_id == record["id"] else self.current_parent_id
+        remaining_ids = [record_id for record_id in ordered_ids if record_id not in selected_ids]
+        self.selected_id = remaining_ids[max(0, first_index - 1)] if remaining_ids else None
+        self.selected_ids = [self.selected_id] if self.selected_id else []
+        if self.current_parent_id in selected_ids:
+            self.current_parent_id = None
         self._refresh_tree()
         self._refresh_preview()
+
+    def _tree_items(self):
+        items = []
+        iterator = QTreeWidgetItemIterator(self.tree)
+        while iterator.value() is not None:
+            items.append(iterator.value())
+            iterator += 1
+        return items
 
     def keyPressEvent(self, event):
         if event.key() in (QtCore.Qt.Key_Backspace, QtCore.Qt.Key_Delete):
@@ -419,10 +435,30 @@ class RapidROIWindow(QMainWindow):
         if not self.new_records:
             QMessageBox.information(self, "Rapid ROIs", "Add at least one new ROI before extracting.")
             return
-        stat = self._stats_for_new_records()
-        if not os.path.isfile(self.parent.ops["reg_file"]):
-            self.parent.ops["reg_file"] = os.path.join(self.parent.basename, "data.bin")
-        result = drawroi.masks_and_traces(self.parent.ops, stat, self.parent.stat)
+        progress = QProgressDialog("Preparing ROIs…", None, 0, 100, self)
+        progress.setWindowTitle("Extracting rapid ROIs")
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setCancelButton(None)
+        progress.setAutoClose(False)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        def report(value, message):
+            progress.setLabelText(message)
+            progress.setValue(value)
+            QApplication.processEvents()
+
+        try:
+            report(0, "Preparing ROI definitions…")
+            stat = self._stats_for_new_records()
+            if not os.path.isfile(self.parent.ops["reg_file"]):
+                self.parent.ops["reg_file"] = os.path.join(self.parent.basename, "data.bin")
+            result = drawroi.masks_and_traces(self.parent.ops, stat, self.parent.stat, progress_callback=report)
+        except Exception:
+            progress.close()
+            raise
+        progress.setValue(100)
+        progress.close()
         self.Fcell, self.Fneu, self.F_chan2, self.Fneu_chan2, self.Spks, _settings, self.new_stat = result
         self.extracted = True
         self.save_button.setEnabled(True)

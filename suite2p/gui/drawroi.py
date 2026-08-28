@@ -24,13 +24,18 @@ from ..parameters import default_settings
 from ..run_s2p import _assign_torch_device
 
 
-def masks_and_traces(settings, stat_manual, stat_orig):
+def masks_and_traces(settings, stat_manual, stat_orig, progress_callback=None):
     """ main extraction function
         inputs: settings and stat
         creates cell and neuropil masks and extracts traces
         returns: F (ROIs x time), Fneu (ROIs x time), F_chan2, Fneu_chan2, settings, stat
         F_chan2 and Fneu_chan2 will be empty if no second channel
     """
+    def report(progress, message):
+        if progress_callback is not None:
+            progress_callback(progress, message)
+
+    report(5, "Preparing ROI masks…")
     # Merge with defaults to ensure all required keys are present
     settings = {**default_settings(), **settings}
 
@@ -59,24 +64,35 @@ def masks_and_traces(settings, stat_manual, stat_orig):
         min_neuropil_pixels=settings["extraction"]["min_neuropil_pixels"],
     )
     print("Masks made in %0.2f sec." % (time.time() - t0))
+    report(25, "Extracting fluorescence from the registered movie…")
 
     # Extract traces from binary file
     Ly, Lx = settings["Ly"], settings["Lx"]
     batch_size = settings["extraction"]["batch_size"]
     device = _assign_torch_device(settings["torch_device"])
     f_reg = BinaryFile(Ly, Lx, settings["reg_file"])
-    F, Fneu = extract_traces(f_reg, manual_cell_masks, manual_neuropil_masks, batch_size=batch_size, device=device)
+    F, Fneu = extract_traces(
+        f_reg, manual_cell_masks, manual_neuropil_masks, batch_size=batch_size, device=device,
+        progress_callback=(lambda current, total: report(25 + 35 * current / total,
+                                                          f"Extracting fluorescence: {current}/{total} batches")),
+    )
     f_reg.close()
 
     # Handle chan2 if present
     if "reg_file_chan2" in settings and settings["reg_file_chan2"]:
+        report(50, "Extracting fluorescence from channel 2…")
         f_reg_chan2 = BinaryFile(Ly, Lx, settings["reg_file_chan2"])
-        F_chan2, Fneu_chan2 = extract_traces(f_reg_chan2, manual_cell_masks, manual_neuropil_masks, batch_size=batch_size, device=device)
+        F_chan2, Fneu_chan2 = extract_traces(
+            f_reg_chan2, manual_cell_masks, manual_neuropil_masks, batch_size=batch_size, device=device,
+            progress_callback=(lambda current, total: report(60 + 20 * current / total,
+                                                              f"Extracting channel 2: {current}/{total} batches")),
+        )
         f_reg_chan2.close()
     else:
         F_chan2, Fneu_chan2 = None, None
 
     # compute activity statistics for classifier
+    report(65, "Calculating ROI statistics…")
     npix = np.array([stat_orig[n]["npix"] for n in range(len(stat_orig))
                     ]).astype("float32")
     for n in range(len(manual_roi_stats)):
@@ -104,8 +120,10 @@ def masks_and_traces(settings, stat_manual, stat_orig):
     dF = preprocess(F=dF, baseline=settings["dcnv_preprocess"]["baseline"], win_baseline=settings["dcnv_preprocess"]["win_baseline"],
                     sig_baseline=settings["dcnv_preprocess"]["sig_baseline"], fs=settings["fs"],
                     prctile_baseline=settings["dcnv_preprocess"]["prctile_baseline"], device=device)
+    report(85, "Inferring spike activity…")
     spks = oasis(F=dF, batch_size=settings["extraction"]["batch_size"], tau=settings["tau"], fs=settings["fs"])
 
+    report(100, "Extraction complete.")
     return F, Fneu, F_chan2, Fneu_chan2, spks, settings, manual_roi_stats
 
 
