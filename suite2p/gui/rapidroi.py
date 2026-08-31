@@ -54,11 +54,19 @@ class RapidROIViewBox(pg.ViewBox):
         self.editor = editor
 
     def mouseClickEvent(self, event):
-        if event.button() == QtCore.Qt.LeftButton and self.editor.draw_mode() == "circle":
-            point = self.mapSceneToView(event.scenePos())
-            self.editor.add_circle(point.y(), point.x())
+        point = self.mapSceneToView(event.scenePos())
+        if event.button() == QtCore.Qt.RightButton:
+            self.editor.remove_roi_at(point.y(), point.x())
             event.accept()
             return
+        if event.button() == QtCore.Qt.LeftButton:
+            if self.editor.select_roi_at(point.y(), point.x()):
+                event.accept()
+                return
+            if self.editor.draw_mode() == "circle":
+                self.editor.add_circle(point.y(), point.x())
+                event.accept()
+                return
         super().mouseClickEvent(event)
 
     def mouseDragEvent(self, event, axis=None):
@@ -96,6 +104,9 @@ class RapidROIWindow(QMainWindow):
         self.ly, self.lx = int(parent.ops["Ly"]), int(parent.ops["Lx"])
         self.records = []
         self.new_records = []
+        self.deleted_existing_indices = set()
+        self.roi_hit_map = np.full((self.ly, self.lx), -1, dtype=np.int32)
+        self.hit_record_ids = []
         self.selected_id = None
         self.selected_ids = []
         self.current_parent_id = None
@@ -110,6 +121,7 @@ class RapidROIWindow(QMainWindow):
         self._load_saved_tree()
         self._build_ui()
         self._install_zoom_shortcuts()
+        self._rebuild_roi_hit_map()
         self._refresh_tree()
         self.set_view(1)
 
@@ -372,6 +384,7 @@ class RapidROIWindow(QMainWindow):
         # A new ROI was placed in the currently visible image region. Re-select
         # it in the list without triggering the list-selection segment jump.
         self._suppress_selection_zoom = True
+        self._rebuild_roi_hit_map()
         self._refresh_tree()
         self._suppress_selection_zoom = False
         self._refresh_preview()
@@ -385,6 +398,53 @@ class RapidROIWindow(QMainWindow):
         points = np.asarray(record["vertices_yx"], dtype=float)
         points = np.vstack((points, points[0]))
         return points[:, 1], points[:, 0]
+
+    def _record_pixels(self, record):
+        if record["shape"] == "circle":
+            return circle_pixels(*record["center_yx"], record["diameter_px"], self.ly, self.lx)
+        return polygon_pixels(record["vertices_yx"], self.ly, self.lx)
+
+    def _rebuild_roi_hit_map(self):
+        self.roi_hit_map.fill(-1)
+        self.hit_record_ids = []
+        for record in self.records:
+            ypix, xpix = self._record_pixels(record)
+            index = len(self.hit_record_ids)
+            self.hit_record_ids.append(record["id"])
+            self.roi_hit_map[ypix, xpix] = index
+
+    def _record_at(self, y, x):
+        y, x = int(round(y)), int(round(x))
+        if not (0 <= y < self.ly and 0 <= x < self.lx):
+            return None
+        index = self.roi_hit_map[y, x]
+        return self._record(self.hit_record_ids[index]) if index >= 0 else None
+
+    def select_roi_at(self, y, x):
+        record = self._record_at(y, x)
+        if record is None:
+            return False
+        self.selected_id = record["id"]
+        self.selected_ids = [record["id"]]
+        self.tree.clearSelection()
+        for item in self._tree_items():
+            if item.data(0, QtCore.Qt.ItemDataRole.UserRole) == record["id"]:
+                item.setSelected(True)
+                self.tree.setCurrentItem(item)
+                break
+        self.selected_id = record["id"]
+        self.selected_ids = [record["id"]]
+        self._refresh_preview()
+        return True
+
+    def remove_roi_at(self, y, x):
+        record = self._record_at(y, x)
+        if record is None:
+            return False
+        self.selected_id = record["id"]
+        self.selected_ids = [record["id"]]
+        self.delete_selected()
+        return True
 
     def _refresh_preview(self):
         xs, ys = [], []
@@ -444,23 +504,27 @@ class RapidROIWindow(QMainWindow):
         deleted = 0
         for record_id in selected_ids:
             record = self._record(record_id)
-            if record is None or record.get("existing"):
+            if record is None:
                 continue
             for child in self.records:
                 if child.get("parent_id") == record["id"]:
                     child["parent_id"] = None
             self.records.remove(record)
-            self.new_records.remove(record)
+            if record.get("existing"):
+                self.deleted_existing_indices.add(int(record["roi_index"]))
+            else:
+                self.new_records.remove(record)
+                self.extracted = False
             deleted += 1
         if not deleted:
-            QMessageBox.information(self, "Rapid ROIs", "Previously saved ROIs cannot be deleted in this editor.")
             return
-        self.save_button.setEnabled(bool(self.new_records))
+        self.save_button.setEnabled(bool(self.new_records or self.deleted_existing_indices))
         remaining_ids = [record_id for record_id in ordered_ids if record_id not in selected_ids]
         self.selected_id = remaining_ids[max(0, first_index - 1)] if remaining_ids else None
         self.selected_ids = [self.selected_id] if self.selected_id else []
         if self.current_parent_id in selected_ids:
             self.current_parent_id = None
+        self._rebuild_roi_hit_map()
         self._refresh_tree()
         self._refresh_preview()
 
@@ -535,46 +599,68 @@ class RapidROIWindow(QMainWindow):
         return True
 
     def save_rois(self):
-        if not self.extracted and not self.extract_rois():
+        if self.new_records and not self.extracted and not self.extract_rois():
             return
         self.save_and_quit()
 
     def _save_tree(self):
-        existing_count = len(self.parent.stat)
+        kept_indices = [index for index in range(len(self.parent.stat)) if index not in self.deleted_existing_indices]
+        existing_index_map = {old: new for new, old in enumerate(kept_indices)}
+        existing_count = len(kept_indices)
         saved = []
         for record in self.records:
             output = {key: value for key, value in record.items() if key != "existing"}
-            if not record.get("existing"):
+            if record.get("existing"):
+                output["roi_index"] = existing_index_map[int(output["roi_index"])]
+            else:
                 output["roi_index"] = existing_count + self.new_records.index(record)
             saved.append(output)
         self.tree_path.write_text(json.dumps({"schema_version": 1, "rois": saved}, indent=2), encoding="utf-8")
 
     def save_and_quit(self):
-        if not self.extracted:
+        if not self.extracted and self.new_records:
             return
         basename = self.parent.basename
         np.save(os.path.join(basename, "stat_orig.npy"), self.parent.stat)
-        stat_all = np.concatenate((self.parent.stat, self.new_stat))
+        keep = np.array(
+            [index for index in range(len(self.parent.stat)) if index not in self.deleted_existing_indices],
+            dtype=int,
+        )
+        stat_all = self.parent.stat[keep]
+        if self.new_records:
+            stat_all = np.concatenate((stat_all, self.new_stat))
         np.save(os.path.join(basename, "stat.npy"), stat_all)
-        old_iscell = np.column_stack((self.parent.iscell, self.parent.probcell))
-        np.save(os.path.join(basename, "iscell.npy"), np.concatenate((old_iscell, np.ones((len(self.new_records), 2))), axis=0))
-        np.save(os.path.join(basename, "F.npy"), np.concatenate((self.parent.Fcell, self.Fcell), axis=0))
-        np.save(os.path.join(basename, "Fneu.npy"), np.concatenate((self.parent.Fneu, self.Fneu), axis=0))
-        np.save(os.path.join(basename, "spks.npy"), np.concatenate((self.parent.Spks, self.Spks), axis=0))
+        old_iscell = np.column_stack((self.parent.iscell, self.parent.probcell))[keep]
+        F = self.parent.Fcell[keep]
+        Fneu = self.parent.Fneu[keep]
+        spks = self.parent.Spks[keep]
+        if self.new_records:
+            old_iscell = np.concatenate((old_iscell, np.ones((len(self.new_records), 2))))
+            F = np.concatenate((F, self.Fcell))
+            Fneu = np.concatenate((Fneu, self.Fneu))
+            spks = np.concatenate((spks, self.Spks))
+        np.save(os.path.join(basename, "iscell.npy"), old_iscell)
+        np.save(os.path.join(basename, "F.npy"), F)
+        np.save(os.path.join(basename, "Fneu.npy"), Fneu)
+        np.save(os.path.join(basename, "spks.npy"), spks)
         if "reg_file_chan2" in self.parent.ops:
-            F_chan2 = np.load(os.path.join(basename, "F_chan2.npy"))
-            Fneu_chan2 = np.load(os.path.join(basename, "Fneu_chan2.npy"))
-            redcell = np.load(os.path.join(basename, "redcell.npy"))
-            np.save(os.path.join(basename, "F_chan2.npy"), np.concatenate((F_chan2, self.F_chan2), axis=0))
-            np.save(os.path.join(basename, "Fneu_chan2.npy"), np.concatenate((Fneu_chan2, self.Fneu_chan2), axis=0))
-            np.save(os.path.join(basename, "redcell.npy"), np.concatenate((redcell, np.zeros((len(self.new_records), 2))), axis=0))
+            F_chan2 = np.load(os.path.join(basename, "F_chan2.npy"))[keep]
+            Fneu_chan2 = np.load(os.path.join(basename, "Fneu_chan2.npy"))[keep]
+            redcell = np.load(os.path.join(basename, "redcell.npy"))[keep]
+            if self.new_records:
+                F_chan2 = np.concatenate((F_chan2, self.F_chan2))
+                Fneu_chan2 = np.concatenate((Fneu_chan2, self.Fneu_chan2))
+                redcell = np.concatenate((redcell, np.zeros((len(self.new_records), 2))))
+            np.save(os.path.join(basename, "F_chan2.npy"), F_chan2)
+            np.save(os.path.join(basename, "Fneu_chan2.npy"), Fneu_chan2)
+            np.save(os.path.join(basename, "redcell.npy"), redcell)
         self._save_tree()
         io.load_proc(self.parent)
         self.save_gui = True
         self.close()
 
     def closeEvent(self, event):
-        if not self.save_gui and self.new_records:
+        if not self.save_gui and (self.new_records or self.deleted_existing_indices):
             answer = QMessageBox.question(self, "Rapid ROIs", "Discard unextracted rapid ROIs?", QMessageBox.Yes | QMessageBox.No)
             if answer != QMessageBox.Yes:
                 event.ignore()
