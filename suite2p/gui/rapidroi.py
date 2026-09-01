@@ -100,6 +100,22 @@ class RapidROIViewBox(pg.ViewBox):
     def __init__(self, editor):
         super().__init__(lockAspect=True, invertY=True)
         self.editor = editor
+        # Be explicit: the rapid editor uses left-drag for panning except when
+        # the user has selected Freehand shape mode.
+        self.setMouseMode(self.PanMode)
+        self.setMouseEnabled(x=True, y=True)
+
+    def wheelEvent(self, event, axis=None):
+        """Zoom about the mouse position, independent of pyqtgraph defaults."""
+        delta = event.delta()
+        if not delta:
+            event.ignore()
+            return
+        point = self.mapSceneToView(event.scenePos())
+        self.editor.set_mouse_position(point.y(), point.x())
+        self.editor.zoom_at_mouse(0.8 if delta > 0 else 1.25)
+        event.accept()
+
 
     def mouseClickEvent(self, event):
         point = self.mapSceneToView(event.scenePos())
@@ -137,6 +153,10 @@ class RapidROIViewBox(pg.ViewBox):
                 self.editor.extend_freehand(point.y(), point.x())
             event.accept()
             return
+        # In circle mode ViewBox's PanMode supplies conventional image panning.
+        if event.button() == QtCore.Qt.LeftButton:
+            point = self.mapSceneToView(event.pos())
+            self.editor.set_mouse_position(point.y(), point.x())
         super().mouseDragEvent(event, axis=axis)
 
     def mouseMoveEvent(self, event):
