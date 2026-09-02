@@ -250,6 +250,9 @@ class RapidROIWindow(QMainWindow):
         self.delete_button = QPushButton("Delete selected ROI(s) [Backspace]")
         self.delete_button.clicked.connect(self.delete_selected)
         left_layout.addWidget(self.delete_button)
+        self.remove_detected_button = QPushButton("Remove existing non-manual ROIs")
+        self.remove_detected_button.clicked.connect(self.remove_existing_non_manual_rois)
+        left_layout.addWidget(self.remove_detected_button)
         self.save_button = QPushButton("Save ROIs")
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self.save_rois)
@@ -954,6 +957,68 @@ class RapidROIWindow(QMainWindow):
         self._refresh_tree()
         self._refresh_preview()
 
+    def _rapid_manual_existing_indices(self):
+        """Indices recorded by a previous Rapid ROI save as manually added."""
+        return {
+            int(record["roi_index"])
+            for record in self.records
+            if record.get("existing") and "roi_index" in record
+        }
+
+    def _remaining_roi_count(self):
+        return len(self.parent.stat) - len(self.deleted_existing_indices) + len(self.new_records)
+
+    def remove_existing_non_manual_rois(self):
+        """Stage removal of detected ROIs while preserving Rapid ROI entries.
+
+        Older Suite2p output has no per-ROI provenance.  ``rapid_rois.json``
+        is therefore the only reliable marker for manual ROIs in this editor.
+        """
+        manual_indices = self._rapid_manual_existing_indices()
+        removable_indices = [
+            index for index in range(len(self.parent.stat))
+            if index not in manual_indices and index not in self.deleted_existing_indices
+        ]
+        if not removable_indices:
+            QMessageBox.information(
+                self, "Rapid ROIs", "There are no existing non-manual ROIs to remove."
+            )
+            return
+
+        remaining = self._remaining_roi_count() - len(removable_indices)
+        warning = (
+            f"Remove {len(removable_indices)} existing ROI(s) that are not recorded in "
+            "rapid_rois.json as Rapid ROI additions?\n\n"
+            "This is staged until Save ROIs is clicked. Suite2p cannot load an output "
+            "with zero ROIs, so saving will be blocked unless at least one existing or "
+            "new Rapid ROI remains.\n\n"
+            "Note: manual ROIs made using an older Suite2p editor are not identifiable "
+            "from the output files and will be treated as non-manual by this action."
+        )
+        if QMessageBox.question(
+            self,
+            "Remove existing non-manual ROIs",
+            warning,
+            QMessageBox.Yes | QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+
+        self.deleted_existing_indices.update(removable_indices)
+        self.save_button.setEnabled(True)
+        self._rebuild_roi_hit_map()
+        self._refresh_peak_candidates()
+        self._refresh_tree()
+        self._refresh_preview()
+        if remaining:
+            self.status.setText(
+                f"Staged removal of {len(removable_indices)} existing non-manual ROIs. "
+                f"{remaining} ROI(s) will remain after saving."
+            )
+        else:
+            self.status.setText(
+                "Staged removal of all existing ROIs. Add and extract at least one Rapid ROI before saving."
+            )
+
     def _tree_items(self):
         items = []
         iterator = QTreeWidgetItemIterator(self.tree)
@@ -1031,6 +1096,13 @@ class RapidROIWindow(QMainWindow):
         # against a queued second click writing the newly appended rows twice.
         if self.save_started or self.save_gui:
             return
+        if self._remaining_roi_count() == 0:
+            QMessageBox.warning(
+                self,
+                "Rapid ROIs",
+                "Suite2p cannot load an output with zero ROIs. Add and extract at least one Rapid ROI before saving.",
+            )
+            return
         self.save_started = True
         self.save_button.setEnabled(False)
         if self.new_records and not self.extracted and not self.extract_rois():
@@ -1055,6 +1127,16 @@ class RapidROIWindow(QMainWindow):
 
     def save_and_quit(self):
         if not self.extracted and self.new_records:
+            return
+        if self._remaining_roi_count() == 0:
+            # This guard also protects against direct calls during GUI shutdown.
+            QMessageBox.warning(
+                self,
+                "Rapid ROIs",
+                "Suite2p cannot load an output with zero ROIs. Nothing was saved.",
+            )
+            self.save_started = False
+            self.save_button.setEnabled(True)
             return
         basename = self.parent.basename
         np.save(os.path.join(basename, "stat_orig.npy"), self.parent.stat)
