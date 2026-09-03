@@ -5,6 +5,7 @@ import traceback
 import uuid
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pyqtgraph as pg
 from matplotlib.path import Path as MplPath
@@ -171,9 +172,9 @@ class RapidROIViewBox(pg.ViewBox):
 
 
 class RapidROIWindow(QMainWindow):
-    VIEW_SPECS = (("W", "Mean", 1), ("E", "Enhanced mean", 2), ("R", "Correlation", 3),
-                  ("M", "Mask", 4), ("T", "Max projection", 5),
-                  ("Y", "Channel 2 corrected", 6), ("U", "Channel 2", 7),
+    VIEW_SPECS = (("W", "Mean", 1), ("E", "Enhanced", 2), ("R", "Corr.", 3),
+                  ("M", "Mask", 4), ("T", "Max", 5),
+                  ("Y", "Ch2 corr.", 6), ("U", "Ch2", 7),
                   ("S", "Smoothed", 8))
 
     def __init__(self, parent):
@@ -203,6 +204,7 @@ class RapidROIWindow(QMainWindow):
         self.setWindowTitle("Suite2p Rapid ROIs")
         self.resize(1300, 900)
         self._load_saved_tree()
+        self._add_missing_existing_records()
         self._build_ui()
         self._install_zoom_shortcuts()
         QApplication.instance().installEventFilter(self)
@@ -222,9 +224,41 @@ class RapidROIWindow(QMainWindow):
             for record in payload.get("rois", []):
                 record = dict(record)
                 record["existing"] = True
+                record["save_in_tree"] = True
                 self.records.append(record)
         except Exception as error:
             print(f"Could not load {self.tree_path}: {error}")
+
+    def _add_missing_existing_records(self):
+        """Represent every Suite2p ROI, including automatically detected ones.
+
+        rapid_rois.json only describes ROIs made through this editor.  The
+        canonical ROI masks are in parent.stat, so use those masks for the
+        outlines and hit testing of both automatic and previously saved rapid
+        ROIs.  Automatically detected records are deliberately not persisted
+        to rapid_rois.json.
+        """
+        stats = self.parent.stat
+        saved_by_index = {
+            int(record["roi_index"]): record
+            for record in self.records
+            if record.get("existing") and record.get("roi_index") is not None
+            and 0 <= int(record["roi_index"]) < len(stats)
+        }
+        for roi_index, stat in enumerate(stats):
+            record = saved_by_index.get(roi_index)
+            if record is None:
+                record = {
+                    "id": uuid.uuid4().hex,
+                    "shape": "existing_mask",
+                    "roi_index": roi_index,
+                    "parent_id": None,
+                    "existing": True,
+                    "save_in_tree": False,
+                }
+                self.records.append(record)
+            record["mask_ypix"] = np.asarray(stat["ypix"], dtype=np.int32).tolist()
+            record["mask_xpix"] = np.asarray(stat["xpix"], dtype=np.int32).tolist()
 
     def _build_ui(self):
         central = QWidget(self)
@@ -274,7 +308,12 @@ class RapidROIWindow(QMainWindow):
         view_box = QWidget()
         view_layout = QHBoxLayout(view_box)
         view_layout.setContentsMargins(0, 0, 0, 0)
-        for key, label, index in self.VIEW_SPECS[:3] + (self.VIEW_SPECS[-1],):
+        # Keep the common backgrounds together while retaining their standard
+        # main-GUI keyboard shortcuts.  Max projection is useful for dim ROIs.
+        for key, label, index in (
+            self.VIEW_SPECS[0], self.VIEW_SPECS[1], self.VIEW_SPECS[2],
+            self.VIEW_SPECS[4], self.VIEW_SPECS[-1],
+        ):
             button = QPushButton(f"{key}: {label}")
             button.setCheckable(True)
             button.clicked.connect(lambda _checked=False, idx=index: self.set_view(idx))
@@ -401,6 +440,12 @@ class RapidROIWindow(QMainWindow):
         # row-major NumPy coordinates.
         self.image = pg.ImageItem(axisOrder="row-major")
         self.viewbox.addItem(self.image)
+        # Purple is reserved for pre-existing Suite2p masks. It is distinct
+        # from cyan new ROIs, pink peak candidates, green candidate selection,
+        # yellow selected ROIs, and salmon freehand drawing.
+        self.existing_preview = pg.PlotCurveItem(
+            pen=pg.mkPen((170, 90, 255), width=1.5), connect="finite"
+        )
         self.preview = pg.PlotCurveItem(pen=pg.mkPen((0, 220, 255), width=1.5), connect="finite")
         self.selected_preview = pg.PlotCurveItem(pen=pg.mkPen((255, 220, 0), width=3), connect="finite")
         self.peak_markers = pg.ScatterPlotItem(size=3, pen=None, brush=pg.mkBrush(255, 80, 200))
@@ -409,6 +454,7 @@ class RapidROIWindow(QMainWindow):
         self.rejected_peak_outlines = pg.PlotCurveItem(pen=pg.mkPen((130, 130, 130), width=1), connect="finite")
         self.selected_peak_outline = pg.PlotCurveItem(pen=pg.mkPen((0, 255, 80), width=3), connect="finite")
         self.drawing_preview = pg.PlotCurveItem(pen=pg.mkPen((255, 120, 100), width=2))
+        self.viewbox.addItem(self.existing_preview)
         self.viewbox.addItem(self.preview)
         self.viewbox.addItem(self.selected_preview)
         self.viewbox.addItem(self.peak_markers)
@@ -691,6 +737,8 @@ class RapidROIWindow(QMainWindow):
 
     def _record_name(self, record):
         index = record.get("roi_index")
+        if record.get("existing"):
+            return f"ROI #{index} (existing)"
         suffix = f"#{index}" if index is not None else f"new {self.records.index(record) + 1}"
         return f"ROI {suffix} ({record['shape']})"
 
@@ -818,6 +866,23 @@ class RapidROIWindow(QMainWindow):
         self._refresh_preview()
 
     def _outline(self, record):
+        if record.get("existing") and "mask_ypix" in record:
+            ypix, xpix = self._record_pixels(record)
+            if not ypix.size:
+                return np.array([]), np.array([])
+            y0, y1 = max(0, ypix.min() - 1), min(self.ly, ypix.max() + 2)
+            x0, x1 = max(0, xpix.min() - 1), min(self.lx, xpix.max() + 2)
+            mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+            mask[ypix - y0, xpix - x0] = 1
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            outline_x, outline_y = [], []
+            for contour in contours:
+                points = contour[:, 0]
+                outline_x.extend(points[:, 0] + x0)
+                outline_x.append(np.nan)
+                outline_y.extend(points[:, 1] + y0)
+                outline_y.append(np.nan)
+            return np.asarray(outline_x), np.asarray(outline_y)
         if record["shape"] == "circle":
             y, x = record["center_yx"]
             radius = record["diameter_px"] / 2.0
@@ -828,6 +893,11 @@ class RapidROIWindow(QMainWindow):
         return points[:, 1], points[:, 0]
 
     def _record_pixels(self, record):
+        if record.get("existing") and "mask_ypix" in record:
+            return (
+                np.asarray(record["mask_ypix"], dtype=np.int32),
+                np.asarray(record["mask_xpix"], dtype=np.int32),
+            )
         if record["shape"] == "circle":
             return circle_pixels(*record["center_yx"], record["diameter_px"], self.ly, self.lx)
         return polygon_pixels(record["vertices_yx"], self.ly, self.lx)
@@ -875,12 +945,18 @@ class RapidROIWindow(QMainWindow):
         return True
 
     def _refresh_preview(self):
-        xs, ys = [], []
+        existing_xs, existing_ys = [], []
+        new_xs, new_ys = [], []
         for record in self.records:
             x, y = self._outline(record)
-            xs.extend(x); xs.append(np.nan)
-            ys.extend(y); ys.append(np.nan)
-        self.preview.setData(xs, ys)
+            if record.get("existing"):
+                existing_xs.extend(x); existing_xs.append(np.nan)
+                existing_ys.extend(y); existing_ys.append(np.nan)
+            else:
+                new_xs.extend(x); new_xs.append(np.nan)
+                new_ys.extend(y); new_ys.append(np.nan)
+        self.existing_preview.setData(existing_xs, existing_ys)
+        self.preview.setData(new_xs, new_ys)
         xs, ys = [], []
         for record_id in self.selected_ids:
             selected = self._record(record_id)
@@ -1116,7 +1192,13 @@ class RapidROIWindow(QMainWindow):
         existing_count = len(kept_indices)
         saved = []
         for record in self.records:
-            output = {key: value for key, value in record.items() if key != "existing"}
+            if record.get("existing") and not record.get("save_in_tree", False):
+                continue
+            output = {
+                key: value
+                for key, value in record.items()
+                if key not in {"existing", "save_in_tree", "mask_ypix", "mask_xpix"}
+            }
             if record.get("existing"):
                 output["roi_index"] = existing_index_map[int(output["roi_index"])]
             else:

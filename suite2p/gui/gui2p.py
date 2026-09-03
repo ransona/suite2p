@@ -64,13 +64,19 @@ class GuiControlServer(QtCore.QObject):
         if stat_path.name != "stat.npy" or not stat_path.is_file():
             connection.write(b"ERROR: stat.npy file not found\n")
         else:
-            self.parent_gui.fname = os.fspath(stat_path)
-            io.load_proc(self.parent_gui)
-            self.parent_gui.raise_()
-            self.parent_gui.activateWindow()
+            # Acknowledge before loading. Loading a large Suite2p result can
+            # take longer than the short launcher timeout; replying afterward
+            # made the launcher wrongly start a second GUI instance.
             connection.write(b"OK\n")
+            QtCore.QTimer.singleShot(0, lambda: self._load_stat_file(stat_path))
         connection.flush()
         connection.disconnectFromServer()
+
+    def _load_stat_file(self, stat_path):
+        self.parent_gui.fname = os.fspath(stat_path)
+        io.load_proc(self.parent_gui)
+        self.parent_gui.raise_()
+        self.parent_gui.activateWindow()
 
 
 class MainWindow(QMainWindow):
