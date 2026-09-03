@@ -1,15 +1,76 @@
 """
 Copyright © 2023 Howard Hughes Medical Institute, Authored by Carsen Stringer and Marius Pachitariu.
 """
+import getpass
 import os, pathlib, shutil, sys, warnings
 
 import numpy as np
 import pyqtgraph as pg
-from qtpy import QtGui, QtCore
+from qtpy import QtGui, QtCore, QtNetwork
 from qtpy.QtWidgets import QMainWindow, QApplication, QWidget, QGridLayout, QCheckBox, QLineEdit, QLabel
 
 from . import menus, io, merge, views, buttons, classgui, traces, graphics, masks, utils, rungui
 from .. import run_s2p, default_settings
+
+
+def gui_control_server_name():
+    """Return the per-user local endpoint used to switch a running GUI."""
+    return f"suite2p-gui-{getpass.getuser()}"
+
+
+class GuiControlServer(QtCore.QObject):
+    """Receive stat.npy paths and load them into this existing GUI instance."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent_gui = parent
+        self._connections = []
+        self.server = QtNetwork.QLocalServer(self)
+        self.server.newConnection.connect(self._accept_connection)
+        self.server_name = gui_control_server_name()
+        # Do not displace a GUI that is already accepting Picker requests.
+        # If the name is stale after a crash, the short connection attempt
+        # fails and it is then safe to remove the abandoned socket.
+        probe = QtNetwork.QLocalSocket(self)
+        probe.connectToServer(self.server_name)
+        endpoint_is_live = probe.waitForConnected(100)
+        if endpoint_is_live:
+            probe.disconnectFromServer()
+            print("Suite2p GUI control endpoint is already owned by another instance")
+            return
+        QtNetwork.QLocalServer.removeServer(self.server_name)
+        if not self.server.listen(self.server_name):
+            print(f"Suite2p GUI control endpoint unavailable: {self.server.errorString()}")
+
+    def _accept_connection(self):
+        while self.server.hasPendingConnections():
+            connection = self.server.nextPendingConnection()
+            self._connections.append(connection)
+            connection.readyRead.connect(
+                lambda connection=connection: self._load_requested_file(connection)
+            )
+            connection.disconnected.connect(
+                lambda connection=connection: self._discard_connection(connection)
+            )
+
+    def _discard_connection(self, connection):
+        if connection in self._connections:
+            self._connections.remove(connection)
+        connection.deleteLater()
+
+    def _load_requested_file(self, connection):
+        requested_path = bytes(connection.readAll()).decode("utf-8", errors="replace").strip()
+        stat_path = pathlib.Path(requested_path)
+        if stat_path.name != "stat.npy" or not stat_path.is_file():
+            connection.write(b"ERROR: stat.npy file not found\n")
+        else:
+            self.parent_gui.fname = os.fspath(stat_path)
+            io.load_proc(self.parent_gui)
+            self.parent_gui.raise_()
+            self.parent_gui.activateWindow()
+            connection.write(b"OK\n")
+        connection.flush()
+        connection.disconnectFromServer()
 
 
 class MainWindow(QMainWindow):
@@ -711,6 +772,9 @@ def run(statfile=None):
     app.setPalette(utils.DarkPalette())
     app.setStyleSheet(utils.stylesheet())
     GUI = MainWindow(statfile=statfile)
+    # Keep this as a child of the main window so the endpoint remains alive
+    # for the entire GUI session and can switch to later Picker selections.
+    GuiControlServer(GUI)
     ret = app.exec_()
     
     # GUI.save_gui_data()
