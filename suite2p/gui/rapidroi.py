@@ -145,7 +145,10 @@ class RapidROIViewBox(pg.ViewBox):
 
     def mouseDragEvent(self, event, axis=None):
         if event.button() == QtCore.Qt.LeftButton and self.editor.draw_mode() == "freehand":
-            point = self.mapSceneToView(event.pos())
+            # DragEvent.pos() is local to the ViewBox, whereas mapSceneToView
+            # expects graphics-scene coordinates. Using pos() here created a
+            # fixed upper-left offset relative to click placement.
+            point = self.mapSceneToView(event.scenePos())
             if event.isStart():
                 self.editor.start_freehand(point.y(), point.x())
             elif event.isFinish():
@@ -1036,6 +1039,19 @@ class RapidROIWindow(QMainWindow):
     def _remaining_roi_count(self):
         return len(self.parent.stat) - len(self.deleted_existing_indices) + len(self.new_records)
 
+    def _retained_existing_stats(self):
+        """Return only existing masks which will remain after this save.
+
+        Removed masks must not influence the neuropil masks or fluorescence
+        traces of newly drawn Rapid ROIs.  In particular, a clean-slate edit
+        passes an empty population into manual extraction.
+        """
+        keep = [
+            index for index in range(len(self.parent.stat))
+            if index not in self.deleted_existing_indices
+        ]
+        return self.parent.stat[np.asarray(keep, dtype=int)]
+
     def remove_existing_non_manual_rois(self):
         """Stage a clean-slate removal of every ROI present on opening."""
         removable_indices = [
@@ -1151,7 +1167,12 @@ class RapidROIWindow(QMainWindow):
             stat = self._stats_for_new_records()
             if not os.path.isfile(self.parent.ops["reg_file"]):
                 self.parent.ops["reg_file"] = os.path.join(self.parent.basename, "data.bin")
-            result = drawroi.masks_and_traces(self.parent.ops, stat, self.parent.stat, progress_callback=report)
+            result = drawroi.masks_and_traces(
+                self.parent.ops,
+                stat,
+                self._retained_existing_stats(),
+                progress_callback=report,
+            )
         except Exception as error:
             progress.close()
             traceback.print_exc()

@@ -24,6 +24,24 @@ from ..parameters import default_settings
 from ..run_s2p import _assign_torch_device
 
 
+def _manual_roi_diameter(settings, stat_manual):
+    """Return a valid two-axis diameter for manual ROI statistics.
+
+    A completed Suite2p run normally stores a two-value detected diameter.
+    However, an output opened after a no-ROI run can still have the default
+    scalar ``diameter=0``.  ``roi_stats`` expects an indexable, non-zero pair;
+    infer a sensible value from the manually drawn masks in that case.
+    """
+    diameter = np.asarray(settings.get("diameter", 0), dtype=float).ravel()
+    if diameter.size == 1:
+        diameter = np.repeat(diameter, 2)
+    if diameter.size < 2 or not np.all(np.isfinite(diameter)) or np.any(diameter <= 0):
+        areas = np.asarray([len(stat["ypix"]) for stat in stat_manual], dtype=float)
+        inferred = np.median(2 * np.sqrt(areas / np.pi)) if areas.size else 12.0
+        diameter = np.array([max(float(inferred), 1.0)] * 2)
+    return diameter[:2]
+
+
 def masks_and_traces(settings, stat_manual, stat_orig, progress_callback=None):
     """ main extraction function
         inputs: settings and stat
@@ -42,13 +60,13 @@ def masks_and_traces(settings, stat_manual, stat_orig, progress_callback=None):
     t0 = time.time()
     
     # Concatenate stat so a good neuropil function can be formed
-    stat_all = stat_manual.copy()
+    stat_all = list(stat_manual.copy())
     for n in range(len(stat_orig)):
         stat_all.append(stat_orig[n])
 
     stat_all = np.array(stat_all)
     stat_all = roi_stats(stat_all, settings["Ly"], settings["Lx"],
-                         diameter=settings["diameter"])
+                         diameter=_manual_roi_diameter(settings, stat_manual))
     cell_masks = [
         masks.create_cell_mask(stat, Ly=settings["Ly"], Lx=settings["Lx"],
                                allow_overlap=settings["extraction"]["allow_overlap"]) for stat in stat_all
@@ -93,15 +111,20 @@ def masks_and_traces(settings, stat_manual, stat_orig, progress_callback=None):
 
     # compute activity statistics for classifier
     report(65, "Calculating ROI statistics…")
-    npix = np.array([stat_orig[n]["npix"] for n in range(len(stat_orig))
-                    ]).astype("float32")
+    npix = np.array([stat_orig[n]["npix"] for n in range(len(stat_orig))], dtype="float32")
+    # A Rapid ROI clean slate deliberately permits no retained automatic ROI.
+    # In that case there is no original-size reference or first stat entry;
+    # use the new ROI population itself and omit the optional plane metadata.
+    npix_reference = npix[:100] if npix.size else np.array(
+        [stat["npix"] for stat in manual_roi_stats], dtype="float32"
+    )
+    npix_normalizer = max(float(np.mean(npix_reference)), 1.0)
     for n in range(len(manual_roi_stats)):
-        manual_roi_stats[n]["npix_norm"] = manual_roi_stats[n]["npix"] / np.mean(
-            npix[:100])  # What if there are less than 100 cells?
+        manual_roi_stats[n]["npix_norm"] = manual_roi_stats[n]["npix"] / npix_normalizer
         manual_roi_stats[n]["compact"] = 1
         manual_roi_stats[n]["footprint"] = 2
         manual_roi_stats[n]["manual"] = 1  # Add manual key
-        if "iplane" in stat_orig[0]:
+        if len(stat_orig) and "iplane" in stat_orig[0]:
             manual_roi_stats[n]["iplane"] = stat_orig[0]["iplane"]
 
     # subtract neuropil and compute skew, std from F
