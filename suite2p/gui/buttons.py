@@ -1,11 +1,47 @@
 """
 Copyright © 2023 Howard Hughes Medical Institute, Authored by Carsen Stringer and Marius Pachitariu.
 """
+import re
+from pathlib import Path
+
 import numpy as np
 from qtpy import QtGui, QtCore
 from qtpy.QtWidgets import QPushButton, QButtonGroup, QLabel, QLineEdit
 
 from . import graphics
+
+
+def plane_navigation_paths(basename):
+    """Return adjacent-plane and paired-channel stat paths for a loaded plane."""
+    plane_dir = Path(basename)
+    match = re.fullmatch(r"plane(\d+)", plane_dir.name)
+    if not match or plane_dir.parent.name != "suite2p":
+        return None, None, None
+
+    plane_number = int(match.group(1))
+    plane_dirs = sorted(
+        (
+            path for path in plane_dir.parent.iterdir()
+            if path.is_dir() and re.fullmatch(r"plane\d+", path.name)
+            and (path / "stat.npy").is_file()
+        ),
+        key=lambda path: int(path.name[5:]),
+    )
+    try:
+        index = plane_dirs.index(plane_dir)
+    except ValueError:
+        return None, None, None
+
+    previous = plane_dirs[index - 1] / "stat.npy" if index else None
+    following = plane_dirs[index + 1] / "stat.npy" if index + 1 < len(plane_dirs) else None
+
+    # Lab outputs store channel 2 under <experiment>/ch2/suite2p/planeN,
+    # alongside the canonical <experiment>/suite2p/planeN output tree.
+    if plane_dir.parent.parent.name == "ch2":
+        counterpart = plane_dir.parent.parent.parent / "suite2p" / plane_dir.name / "stat.npy"
+    else:
+        counterpart = plane_dir.parent.parent / "ch2" / "suite2p" / plane_dir.name / "stat.npy"
+    return previous, following, counterpart if counterpart.is_file() else None
 
 
 def make_selection(parent):
@@ -48,6 +84,21 @@ def make_cellnotcell(parent):
     parent.lcell1 = QLabel("")
     parent.l0.addWidget(parent.lcell1, 0, 20, 1, 2)
 
+    parent.prev_plane_button = QPushButton("Prev")
+    parent.prev_plane_button.clicked.connect(lambda: load_adjacent_plane(parent, -1))
+    parent.l0.addWidget(parent.prev_plane_button, 0, 22, 1, 1)
+    parent.plane_label = QLabel("Plane —")
+    parent.plane_label.setAlignment(QtCore.Qt.AlignCenter)
+    parent.l0.addWidget(parent.plane_label, 0, 23, 1, 2)
+    parent.next_plane_button = QPushButton("Next")
+    parent.next_plane_button.clicked.connect(lambda: load_adjacent_plane(parent, 1))
+    parent.l0.addWidget(parent.next_plane_button, 0, 25, 1, 1)
+    parent.channel_button = QPushButton("Channel")
+    parent.channel_button.clicked.connect(lambda: load_paired_channel(parent))
+    parent.l0.addWidget(parent.channel_button, 0, 26, 1, 2)
+    for button in (parent.prev_plane_button, parent.next_plane_button, parent.channel_button):
+        button.setEnabled(False)
+
     parent.sizebtns = QButtonGroup(parent)
     b = 0
     labels = [" cells", " both", " not cells"]
@@ -60,6 +111,42 @@ def make_cellnotcell(parent):
             btn.setChecked(True)
         b += 1
     parent.sizebtns.setExclusive(True)
+
+
+def update_plane_navigation(parent):
+    """Update plane/channel controls for the currently loaded stat.npy."""
+    if not hasattr(parent, "plane_label"):
+        return
+    previous, following, counterpart = plane_navigation_paths(getattr(parent, "basename", ""))
+    plane_name = Path(getattr(parent, "basename", "")).name
+    if re.fullmatch(r"plane\d+", plane_name):
+        parent.plane_label.setText(f"Plane {int(plane_name[5:])}")
+    else:
+        parent.plane_label.setText("Plane —")
+    parent.prev_plane_button.setEnabled(previous is not None)
+    parent.next_plane_button.setEnabled(following is not None)
+    parent.channel_button.setEnabled(counterpart is not None)
+    parent.channel_button.setToolTip(
+        str(counterpart) if counterpart is not None else "No matching channel output for this plane"
+    )
+
+
+def _load_stat(parent, stat_path):
+    if stat_path is None:
+        return
+    parent.fname = str(stat_path)
+    from . import io
+    io.load_proc(parent)
+
+
+def load_adjacent_plane(parent, direction):
+    previous, following, _counterpart = plane_navigation_paths(parent.basename)
+    _load_stat(parent, previous if direction < 0 else following)
+
+
+def load_paired_channel(parent):
+    _previous, _following, counterpart = plane_navigation_paths(parent.basename)
+    _load_stat(parent, counterpart)
 
 
 def make_quadrants(parent):

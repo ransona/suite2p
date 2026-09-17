@@ -206,6 +206,9 @@ class MainWindow(QMainWindow):
             print("invalid extension %s, use .nwb or .npy" %
                   os.path.splitext(self.fname)[-1])
 
+    def update_plane_navigation(self):
+        buttons.update_plane_navigation(self)
+
     def make_buttons(self):
         # ROI CHECKBOX
         self.l0.setVerticalSpacing(4)

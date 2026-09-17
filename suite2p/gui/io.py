@@ -18,9 +18,14 @@ def export_fig(parent):
 
 
 def make_masks_and_enable_buttons(parent):
+    # Loading another plane/channel should retain the user's display choices.
+    # ``load_to_GUI`` captures these before replacing the data and setting
+    # ``loaded`` false; the image range is deliberately reset below.
+    selected_view = getattr(parent, "_view_before_load", parent.ops_plot.get("view", 0))
+    selected_size = getattr(parent, "_size_before_load", parent.sizebtns.checkedId())
     parent.checkBox.setChecked(True)
     parent.ops_plot["color"] = 0
-    parent.ops_plot["view"] = 0
+    parent.ops_plot["view"] = selected_view
     parent.colors["cols"] = 0
     parent.colors["istat"] = 0
     if parent.checkBoxN.isChecked():
@@ -106,6 +111,8 @@ def make_masks_and_enable_buttons(parent):
     graphics.reset_image_view_after_layout(parent)
     # no classifier loaded
     classgui.activate(parent, False)
+    parent.__dict__.pop("_view_before_load", None)
+    parent.__dict__.pop("_size_before_load", None)
 
 
 def enable_views_and_classifier(parent):
@@ -115,10 +122,6 @@ def enable_views_and_classifier(parent):
     for b in range(len(parent.view_names)):
         parent.viewbtns.button(b).setEnabled(True)
         parent.viewbtns.button(b).setStyleSheet(parent.styleUnpressed)
-        # parent.viewbtns.button(b).setShortcut(QtGui.QKeySequence("R"))
-        if b == 0:
-            parent.viewbtns.button(b).setChecked(True)
-            parent.viewbtns.button(b).setStyleSheet(parent.stylePressed)
     if "meanImg_signal_mask" not in parent.ops:
         parent.viewbtns.button(4).setEnabled(False)
         parent.viewbtns.button(4).setStyleSheet(parent.styleInactive)
@@ -129,6 +132,17 @@ def enable_views_and_classifier(parent):
         if "meanImg_chan2" not in parent.ops:
             parent.viewbtns.button(7).setEnabled(False)
             parent.viewbtns.button(7).setStyleSheet(parent.styleInactive)
+
+    # Retain the prior background where it exists in the newly loaded data.
+    # A channel-specific view may not be available after switching channel, in
+    # which case use the standard ROI view as the only safe fallback.
+    selected_view = int(parent.ops_plot.get("view", 0))
+    if (selected_view < 0 or selected_view >= len(parent.view_names) or
+            not parent.viewbtns.button(selected_view).isEnabled()):
+        selected_view = 0
+    parent.ops_plot["view"] = selected_view
+    parent.viewbtns.button(selected_view).setChecked(True)
+    parent.viewbtns.button(selected_view).setStyleSheet(parent.stylePressed)
 
     for b in range(len(parent.color_names)):
         if b == 5:
@@ -145,15 +159,16 @@ def enable_views_and_classifier(parent):
 
     #parent.applyclass.setStyleSheet(parent.styleUnpressed)
     #parent.applyclass.setEnabled(True)
-    b = 0
+    selected_size = getattr(parent, "_size_before_load", parent.sizebtns.checkedId())
+    if selected_size not in range(len(parent.sizebtns.buttons())):
+        selected_size = 1
     for btn in parent.sizebtns.buttons():
         btn.setStyleSheet(parent.styleUnpressed)
         btn.setEnabled(True)
-        if b == 0:
-            btn.setChecked(True)
-            btn.setStyleSheet(parent.stylePressed)
-            btn.press(parent)
-        b += 1
+    selected_size_button = parent.sizebtns.button(selected_size)
+    selected_size_button.setChecked(True)
+    selected_size_button.setStyleSheet(parent.stylePressed)
+    selected_size_button.press(parent)
     for b in range(3):
         if b == 0:
             parent.topbtns.button(b).setEnabled(True)
@@ -347,6 +362,11 @@ def load_proc(parent):
 
 
 def load_to_GUI(parent, basename, procs):
+    # Preserve GUI state before this load invalidates the old image data.  The
+    # range itself is intentionally not retained: each plane should reopen at
+    # its complete extent.
+    parent._view_before_load = parent.ops_plot.get("view", 0)
+    parent._size_before_load = parent.sizebtns.checkedId()
     parent.loaded = False
     stat, ops, Fcell, Fneu, Spks, iscell, probcell, redcell, probredcell, hasred = procs
     parent.basename = basename
@@ -388,6 +408,7 @@ def load_to_GUI(parent, basename, procs):
         parent.stat[n]["inmerge"] = 0
     parent.stat = np.array(parent.stat)
     make_masks_and_enable_buttons(parent)
+    parent.update_plane_navigation()
     parent.ichosen = 0
     parent.imerge = [0]
     for n in range(len(parent.stat)):
