@@ -196,6 +196,12 @@ def pipeline(save_path, f_reg, f_raw=None, f_reg_chan2=None, f_raw_chan2=None,
         # remove ROIs with low SNR and recompute overlapping pixels
         snr = 1 - 0.5 * np.diff(dF, axis=1).var(axis=1) / dF.var(axis=1)
         keep_rois = snr > snr_threshold
+        # A fallback ROI exists only to make an otherwise empty run usable.
+        # Do not discard it during the optional SNR-cleaning pass.
+        fallback_rois = np.asarray(
+            [s.get("fallback_roi", False) for s in stat], dtype=bool
+        )
+        keep_rois |= fallback_rois
         nremove = (~keep_rois).sum()
         if step==0 and snr_threshold > 0 and nremove > 0:
             logger.info(f"Removing {nremove} ROIs with snr < {snr_threshold}")
@@ -244,6 +250,12 @@ def pipeline(save_path, f_reg, f_raw=None, f_reg_chan2=None, f_raw_chan2=None,
     t11 = time.time()
     if len(stat):
         iscell = classification.classify(stat=stat, classfile=classfile)
+        fallback_rois = np.asarray(
+            [s.get("fallback_roi", False) for s in stat], dtype=bool
+        )
+        # The placeholder is not an automatically detected cell.  It remains
+        # visible in Suite2p's not-cell list and can be edited there.
+        iscell[fallback_rois] = (0, 0)
     else:
         iscell = np.zeros((0, 2))
     np.save(os.path.join(save_path, "iscell.npy"), iscell)

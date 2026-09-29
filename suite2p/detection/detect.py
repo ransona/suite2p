@@ -21,6 +21,26 @@ from ..logger import TqdmToLogger
 cellpose_options_num = {'max_proj / meanImg': 1, 'meanImg':2, 'enhanced_meanImg': 3 ,'max_proj': 4}
 
 
+def fallback_center_roi(Ly, Lx, size=10):
+    """Return a small central ROI used only when detection finds none.
+
+    ``Ly`` and ``Lx`` are the dimensions of the detection crop.  The ROI is
+    deliberately marked so downstream processing can retain it as a non-cell.
+    """
+    side = max(1, min(int(size), int(Ly), int(Lx)))
+    y0 = max(0, min(int(Ly) - side, int(Ly) // 2 - side // 2))
+    x0 = max(0, min(int(Lx) - side, int(Lx) // 2 - side // 2))
+    yy, xx = np.meshgrid(
+        np.arange(y0, y0 + side), np.arange(x0, x0 + side), indexing="ij"
+    )
+    return {
+        "ypix": yy.ravel(),
+        "xpix": xx.ravel(),
+        "lam": np.ones(side * side, dtype=np.float32),
+        "fallback_roi": True,
+    }
+
+
 def mean_intensity_signal_map(meanImg, diameter):
     """Return a smoothed, normalized mean-image signal map."""
     meanImg = meanImg.astype(np.float32, copy=False)
@@ -401,9 +421,19 @@ def detection_wrapper(f_reg, diameter=[12., 12.], tau=1., fs=30, meanImg_chan2=N
             logger.info(f"Removed {n_removed_max_roi_height} ROIs taller than {max_roi_height} pixels")
         stat = stat[keep]
 
+    fallback_roi_added = False
     if len(stat) == 0:
-        raise ValueError(
-            "no ROIs were found -- check registered binary and maybe try changing spatial scale / diameter / threshold_scaling"
+        if not settings.get("fallback_center_roi", True):
+            raise ValueError(
+                "no ROIs were found -- check registered binary and maybe try changing spatial scale / diameter / threshold_scaling"
+            )
+        crop_ly = int(yrange[1] - yrange[0])
+        crop_lx = int(xrange[1] - xrange[0])
+        stat = np.asarray([fallback_center_roi(crop_ly, crop_lx)], dtype=object)
+        fallback_roi_added = True
+        logger.warning(
+            "No ROIs were detected; adding a centred 10 x 10 pixel fallback ROI "
+            "so extraction can complete and the GUI can be opened."
         )
 
     # move ROIs to original coordinates
@@ -428,6 +458,9 @@ def detection_wrapper(f_reg, diameter=[12., 12.], tau=1., fs=30, meanImg_chan2=N
         #import pdb; pdb.set_trace()
         iscell = classify(stat=stat, classfile=classifier_path)
         ic = (iscell[:, 1] > preclassify).flatten().astype("bool")
+        # The fallback is infrastructure rather than a detected cell, but must
+        # survive preclassification so that a zero-detection run can complete.
+        ic |= np.asarray([s.get("fallback_roi", False) for s in stat], dtype=bool)
         stat = stat[ic]
         
         if len(stat) == 0:
@@ -460,6 +493,7 @@ def detection_wrapper(f_reg, diameter=[12., 12.], tau=1., fs=30, meanImg_chan2=N
     new_settings["meanImg_crop"] = meanImg
     new_settings["max_proj"] = max_proj
     new_settings["diameter"] = diameter
+    new_settings["fallback_center_roi_added"] = fallback_roi_added
     if threshold_signal_mask is not None:
         full_mask = np.zeros((Ly, Lx), dtype=bool)
         full_roi_mask = np.zeros((Ly, Lx), dtype=bool)

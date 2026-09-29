@@ -562,6 +562,14 @@ SETTINGS = {
             "default": 1.0,
             "description": "Adjust the automatically determined threshold in sparsery and sourcery by this scalar multiplier - set it smaller to find more cells.",
         },
+        "fallback_center_roi": {
+            "gui_name": "Fallback centre ROI",
+            "type": bool,
+            "min": None,
+            "max": None,
+            "default": True,
+            "description": "When detection finds no ROIs, add a 10 x 10 pixel centre ROI so extraction completes and the GUI can open. The fallback is saved as a not-cell.",
+        },
         "bright_area_percentile": {
             "gui_name": "Bright area",
             "type": float,
